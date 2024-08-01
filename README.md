@@ -56,7 +56,7 @@ cp zig-out/bin/zigup BIN_PATH
 
 # Building Zigup
 
-Zigup is currently built/tested using zig 0.12.0.
+Zigup is currently built/tested using zig master (0.14.0-dev).
 
 # TODO
 
@@ -65,3 +65,11 @@ Zigup is currently built/tested using zig 0.12.0.
 # Dependencies
 
 On linux and macos, zigup depends on `tar` to extract the compiler archive files (this may change in the future).
+
+# License
+
+Copyright (c) Zigup contributers
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
