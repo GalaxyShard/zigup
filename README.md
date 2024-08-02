@@ -2,19 +2,30 @@
 
 Download and manage zig compilers.
 
-# How to Install
+# Building
 
-Go to https://marler8997.github.io/zigup and select your OS/Arch to get a download link and/or instructions to install via the command-line.
+Zigup is currently built/tested using zig master (0.14.0-dev).
 
-Otherwise, you can manually find and download/extract the applicable archive from [Releases](https://github.com/marler8997/zigup/releases). It will contain a single static binary named `zigup`, unless you're on Windows in which case it's 2 files, `zigup.exe` and `zigup.pdb`.
+```sh
+git clone https://github.com/galaxyshard/zigup
+cd zigup
+
+# Build in debug mode
+zig build
+
+# Build in release mode: ReleaseSafe, ReleaseFast, ReleaseSmall
+zig build -Doptimize=ReleaseSafe
+```
 
 # Usage
 
 ```
 # fetch a compiler and set it as the default
 zigup <version>
+zigup 0.13.0
+zigup 0.4.0-mach
 zigup master
-zigup 0.6.0
+zigup mach-latest
 
 # fetch a compiler only (do not set it as default)
 zigup fetch <version>
@@ -29,10 +40,10 @@ zigup default <version>
 # list the installed compiler versions
 zigup list
 
-# clean compilers that are not the default, not master, and not marked to keep. when a version is specified, it will clean that version
-zigup clean [<version>]
+# Removes this compiler
+zigup clean <version>
 
-# mark a compiler to keep
+# mark a compiler to keep (TODO: currently does nothing)
 zigup keep <version>
 
 # run a specific version of the compiler
@@ -41,30 +52,23 @@ zigup run <version> <args>...
 
 # How the compilers are managed
 
-zigup stores each compiler in a global "install directory" in a versioned subdirectory.  On posix systems the "install directory" is `$HOME/zig` and on windows the install directory will be a directory named "zig" in the same directory as the "zigup.exe".
+zigup stores each compiler and language server in a subdirectory of the installation directory, by default the data directory from [known-folders](https://github.com/ziglibs/known-folders).
 
-zigup makes the zig program available by creating an entry in a directory that occurs in the `PATH` environment variable.  On posix systems this entry is a symlink to one of the `zig` executables in the install directory.  On windows this is an executable that forwards invocations to one of the `zig` executables in the install directory.
+(TODO: temporarily removed) Zigup can optionally symlink a "default" Zig/ZLS. On windows this will create an executable that forwards invocations to one of the `zig`/`zls` executables in the install directory.
 
-Both the "install directory" and "path link" are configurable through command-line options `--install-dir` and `--path-link` respectively.
-# Building
-
-Run `zig build` to build, `zig build test` to test and install with:
+Options can be configured via the following command line options:
 ```
-# install to a bin directory with
-cp zig-out/bin/zigup BIN_PATH
+# Single-run
+--install-dir DIR
+# TODO: these do nothing
+--zig-symlink FILE_PATH
+--zls-symlink FILE_PATH
+
+# Persist settings (saves in the default configuration directory from known-folders)
+zigup set-install-dir DIR
+zigup set-zig-symlink FILE_PATH
+zigup set-zls-symlink FILE_PATH
 ```
-
-# Building Zigup
-
-Zigup is currently built/tested using zig master (0.14.0-dev).
-
-# TODO
-
-* set/remove compiler in current environment without overriding the system-wide version.
-
-# Dependencies
-
-On linux and macos, zigup depends on `tar` to extract the compiler archive files (this may change in the future).
 
 # License
 

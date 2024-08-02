@@ -3,9 +3,10 @@ const std = @import("std");
 
 const log = std.log.scoped(.zigexelink);
 
-// NOTE: to prevent the exe from having multiple markers, I can't create a separate string literal
-//       for the marker and get the length from that, I have to hardcode the length
-const exe_marker_len = 42;
+// NOTE: to prevent the exe from having multiple markers, there can't be a separate string literal
+//       for the marker to get the length
+// TODO: check if this creates two strings in the binary
+const exe_marker_len = "!!!THIS MARKS THE zig_exe_string MEMORY!!#".len;
 
 // I'm exporting this and making it mutable to make sure the compiler keeps it around
 // and prevent it from evaluting its contents at comptime
@@ -45,8 +46,8 @@ pub fn main() !u8 {
     // NOTE: create the process.child before calling SetConsoleCtrlHandler because it uses it
     global.child = std.process.Child.init(args, global.arena);
 
-    if (0 == win32.SetConsoleCtrlHandler(consoleCtrlHandler, 1)) {
-        log.err("SetConsoleCtrlHandler failed, error={}", .{win32.GetLastError()});
+    if (0 == std.os.windows.SetConsoleCtrlHandler(consoleCtrlHandler, 1)) {
+        log.err("SetConsoleCtrlHandler failed, error={}", .{std.os.windows.kernel32.GetLastError()});
         return 0xff; // fail
     }
 
@@ -59,16 +60,16 @@ pub fn main() !u8 {
     };
 }
 
-fn consoleCtrlHandler(ctrl_type: u32) callconv(@import("std").os.windows.WINAPI) win32.BOOL {
+fn consoleCtrlHandler(ctrl_type: u32) callconv(std.os.windows.WINAPI) std.os.windows.BOOL {
     //
     // NOTE: Do I need to synchronize this with the main thread?
     //
     const name: []const u8 = switch (ctrl_type) {
-        win32.CTRL_C_EVENT => "Control-C",
-        win32.CTRL_BREAK_EVENT => "Break",
-        win32.CTRL_CLOSE_EVENT => "Close",
-        win32.CTRL_LOGOFF_EVENT => "Logoff",
-        win32.CTRL_SHUTDOWN_EVENT => "Shutdown",
+        std.os.windows.CTRL_C_EVENT => "Control-C",
+        std.os.windows.CTRL_BREAK_EVENT => "Break",
+        std.os.windows.CTRL_CLOSE_EVENT => "Close",
+        std.os.windows.CTRL_LOGOFF_EVENT => "Logoff",
+        std.os.windows.CTRL_SHUTDOWN_EVENT => "Shutdown",
         else => "Unknown",
     };
     // TODO: should we stop the process on a break event?
@@ -85,25 +86,3 @@ fn consoleCtrlHandler(ctrl_type: u32) callconv(@import("std").os.windows.WINAPI)
     std.process.exit(exit_code);
     unreachable;
 }
-
-const win32 = struct {
-    pub const BOOL = i32;
-    pub const CTRL_C_EVENT = @as(u32, 0);
-    pub const CTRL_BREAK_EVENT = @as(u32, 1);
-    pub const CTRL_CLOSE_EVENT = @as(u32, 2);
-    pub const CTRL_LOGOFF_EVENT = @as(u32, 5);
-    pub const CTRL_SHUTDOWN_EVENT = @as(u32, 6);
-    pub const GetLastError = std.os.windows.kernel32.GetLastError;
-    pub const PHANDLER_ROUTINE = switch (builtin.zig_backend) {
-        .stage1 => fn (
-            CtrlType: u32,
-        ) callconv(@import("std").os.windows.WINAPI) BOOL,
-        else => *const fn (
-            CtrlType: u32,
-        ) callconv(@import("std").os.windows.WINAPI) BOOL,
-    };
-    pub extern "kernel32" fn SetConsoleCtrlHandler(
-        HandlerRoutine: ?PHANDLER_ROUTINE,
-        Add: BOOL,
-    ) callconv(@import("std").os.windows.WINAPI) BOOL;
-};
