@@ -25,9 +25,7 @@ const os = switch (builtin.os.tag) {
     .freebsd => "freebsd",
     else => @compileError("Unsupported OS"),
 };
-const url_platform = os ++ "-" ++ arch;
 const json_platform = arch ++ "-" ++ os;
-const archive_ext = if (builtin.os.tag == .windows) "zip" else "tar.xz";
 
 var global_enable_log = true;
 fn loginfo(comptime fmt: []const u8, args: anytype) void {
@@ -240,8 +238,9 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
 
-
-    var cli = try parseCliArgs(alloc);
+    const raw_args = try std.process.argsAlloc(alloc);
+    var cli = try parseCliArgs(alloc, raw_args);
+    std.process.argsFree(alloc, raw_args);
     defer cli.deinit(alloc);
 
     const resolved_config: ResolvedZigupConfig = .{
@@ -333,11 +332,7 @@ pub fn main() !void {
     }
 }
 
-fn parseCliArgs(alloc: Allocator) !Cli {
-
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
-
+fn parseCliArgs(alloc: Allocator, args: []const []const u8) !Cli {
     if (args.len < 2) {
         try print_help();
         std.process.exit(0);
@@ -494,6 +489,37 @@ fn parseCliArgs(alloc: Allocator) !Cli {
         .action = action.?,
     };
 }
+
+
+
+test "parseCliArgs: download & set default" {
+    const cli = try parseCliArgs(std.testing.allocator, &.{
+        "zigup", "0.13.0",
+    });
+    defer cli.deinit(std.testing.allocator);
+    try std.testing.expect(cli.action == .download_default);
+    try std.testing.expectEqualStrings(cli.action.download_default.version, "0.13.0");
+}
+test "parseCliArgs: fetch" {
+    const cli = try parseCliArgs(std.testing.allocator, &.{
+        "zigup", "fetch", "master", "--install-dir", "testing/path",
+    });
+    defer cli.deinit(std.testing.allocator);
+    try std.testing.expect(cli.action == .fetch);
+    try std.testing.expectEqualStrings(cli.action.fetch.version, "master");
+    try std.testing.expectEqualStrings(cli.config.install_dir.?, "testing/path");
+}
+test "parseCliArgs: get default" {
+    const cli = try parseCliArgs(std.testing.allocator, &.{
+        "zigup", "default",
+    });
+    defer cli.deinit(std.testing.allocator);
+    try std.testing.expect(cli.action == .default);
+    try std.testing.expectEqual(cli.action.default.version, null);
+}
+
+
+
 const ConfigKey = enum { install_dir, zig_symlink, zls_symlink };
 const ZigupConfig = struct {
     install_dir: ?[]const u8 = null,
@@ -608,7 +634,7 @@ fn resolveVersion(alloc: Allocator, indexes: *IndexDownloads, config: ResolvedZi
                     string.clearRetainingCapacity();
                     try string.appendSlice(pair.key_ptr.*);
 
-                    const compiler = pair.value_ptr.object.get(url_platform) orelse return error.UnsupportedSystem;
+                    const compiler = pair.value_ptr.object.get(json_platform) orelse return error.UnsupportedSystem;
                     const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
 
                     url.clearRetainingCapacity();
@@ -629,7 +655,7 @@ fn resolveVersion(alloc: Allocator, indexes: *IndexDownloads, config: ResolvedZi
         const master = (try indexes.getZig(alloc)).value.object.get("master") orelse return error.InvalidIndexJson;
         const version = master.object.get("version") orelse return error.InvalidIndexJson;
 
-        const compiler = master.object.get(url_platform) orelse return error.UnsupportedSystem;
+        const compiler = master.object.get(json_platform) orelse return error.UnsupportedSystem;
         const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
 
 
@@ -675,7 +701,7 @@ fn resolveVersion(alloc: Allocator, indexes: *IndexDownloads, config: ResolvedZi
         const mach_latest = (try indexes.getMach(alloc)).value.object.get("mach-latest") orelse return error.InvalidIndexJson;
         const version = mach_latest.object.get("version") orelse return error.InvalidIndexJson;
 
-        const compiler = mach_latest.object.get(url_platform) orelse return error.UnsupportedSystem;
+        const compiler = mach_latest.object.get(json_platform) orelse return error.UnsupportedSystem;
         const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
 
         return .{
@@ -685,7 +711,7 @@ fn resolveVersion(alloc: Allocator, indexes: *IndexDownloads, config: ResolvedZi
 
     } else if (std.mem.endsWith(u8, raw_version, "-mach")) {
         const json = (try indexes.getMach(alloc)).value.object.get(raw_version) orelse return error.InvalidVersion;
-        const compiler = json.object.get(url_platform) orelse return error.UnsupportedSystem;
+        const compiler = json.object.get(json_platform) orelse return error.UnsupportedSystem;
         const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
         return .{
             .string = try alloc.dupe(u8, raw_version),
@@ -695,7 +721,7 @@ fn resolveVersion(alloc: Allocator, indexes: *IndexDownloads, config: ResolvedZi
     } else {
 
         const json = (try indexes.getZig(alloc)).value.object.get(raw_version) orelse return error.InvalidVersion;
-        const compiler = json.object.get(url_platform) orelse return error.UnsupportedSystem;
+        const compiler = json.object.get(json_platform) orelse return error.UnsupportedSystem;
         const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
         return .{
             .string = try alloc.dupe(u8, raw_version),
@@ -754,11 +780,48 @@ const mach_index_url = "https://machengine.org/zig/index.json";
 const DownloadIndex = struct {
     text: []u8,
     json: std.json.Parsed(std.json.Value),
-    pub fn deinit(self: *DownloadIndex, allocator: Allocator) void {
+//     json: std.json.Parsed(IndexJson),
+    pub fn deinit(self: DownloadIndex, allocator: Allocator) void {
         self.json.deinit();
         allocator.free(self.text);
     }
 };
+
+// const IndexJson = struct {
+//     const TargetDownload = struct {
+//         tarball: []const u8,
+//         shasum: []const u8,
+//         size: []const u8,
+//     };
+//     const Release = struct {
+//         version: ?[]const u8,
+//         date: []const u8,
+//         docs: []const u8,
+//         stdDocs: []const u8,
+//         downloads: std.StringArrayHashMap(TargetDownload),
+//
+//         pub fn jsonParseFromValue(
+//             alloc: Allocator,
+//             source: std.json.Value,
+//             options: std.json.ParseOptions
+//         ) std.json.ParseFromValueError!Release {
+// //             source.
+//         }
+//     };
+//     releases: std.StringArrayHashMap(Release),
+//
+//     pub fn jsonParseFromValue(
+//         alloc: Allocator,
+//         source: std.json.Value,
+//         options: std.json.ParseOptions
+//     ) std.json.ParseFromValueError!IndexJson {
+//         const self: IndexJson = .{
+//             .releases = undefined,
+//         };
+//         self.releases = @TypeOf(self.releases).jsonParseFromValue(alloc, source, options);
+//         return self;
+//     }
+// };
 
 fn fetchDownloadIndex(alloc: Allocator, comptime url: enum { zig,mach }) !DownloadIndex {
     const url_string = switch (url) {
@@ -774,7 +837,9 @@ fn fetchDownloadIndex(alloc: Allocator, comptime url: enum { zig,mach }) !Downlo
     };
     errdefer alloc.free(text);
 
-    var json = try std.json.parseFromSlice(std.json.Value, alloc, text, .{});
+    var json = try std.json.parseFromSlice(std.json.Value, alloc, text, .{
+//         .ignore_unknown_fields = true,
+    });
     errdefer json.deinit();
 
     return DownloadIndex{ .text = text, .json = json };
@@ -1107,18 +1172,6 @@ fn createExeLink(link_target: []const u8, path_link: []const u8) !void {
     try file.writer().writeAll(win32exelink.content[win32exelink.exe_offset + link_target.len ..]);
 }
 
-const VersionKind = enum { release, dev };
-fn determineVersionKind(version: []const u8) VersionKind {
-    return if (std.mem.indexOfAny(u8, version, "-+")) |_| .dev else .release;
-}
-
-fn getDefaultUrl(allocator: Allocator, compiler_version: []const u8) ![]const u8 {
-    return switch (determineVersionKind(compiler_version)) {
-        .dev => try std.fmt.allocPrint(allocator, "https://ziglang.org/builds/zig-" ++ url_platform ++ "-{0s}." ++ archive_ext, .{compiler_version}),
-        .release => try std.fmt.allocPrint(allocator, "https://ziglang.org/download/{s}/zig-" ++ url_platform ++ "-{0s}." ++ archive_ext, .{compiler_version}),
-    };
-}
-
 fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const u8) !void {
 
     if (std.fs.cwd().access(compiler_dir, .{})) |_| {
@@ -1133,7 +1186,7 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
     const installing_dir = try std.mem.concat(allocator, u8, &[_][]const u8{ compiler_dir, ".installing" });
     defer allocator.free(installing_dir);
     try std.fs.cwd().deleteTree(installing_dir);
-    try std.fs.cwd().makeDir(installing_dir);
+    try std.fs.cwd().makePath(installing_dir);
 
     const archive_basename = std.fs.path.basename(url);
     var archive_root_dir: []const u8 = undefined;
@@ -1161,13 +1214,15 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
         }
 
         if (std.mem.endsWith(u8, archive_basename, ".tar.xz")) {
+            loginfo("extracting {s} into {s}", .{ archive, installing_dir });
             archive_root_dir = archive_basename[0 .. archive_basename.len - ".tar.xz".len];
 
-            var file = try std.fs.cwd().createFile(archive, .{});
+            var file = try std.fs.cwd().openFile(archive, .{});
             defer file.close();
 
             var dir = try std.fs.cwd().openDir(installing_dir, .{});
             defer dir.close();
+
 
             var tar = try std.compress.xz.decompress(allocator, file.reader());
             try std.tar.pipeToFileSystem(dir, tar.reader(), .{});
@@ -1175,12 +1230,14 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
             var recognized = false;
             if (builtin.os.tag == .windows) {
                 if (std.mem.endsWith(u8, archive_basename, ".zip")) {
+                    loginfo("extracting {s} into {s}", .{ archive, installing_dir });
                     recognized = true;
                     archive_root_dir = archive_basename[0 .. archive_basename.len - ".zip".len];
 
                     var installing_dir_opened = try std.fs.cwd().openDir(installing_dir, .{});
                     defer installing_dir_opened.close();
-                    loginfo("extracting archive to \"{s}\"", .{installing_dir});
+
+
                     var timer = try std.time.Timer.start();
                     var archive_file = try std.fs.cwd().openFile(archive, .{});
                     defer archive_file.close();

@@ -10,8 +10,8 @@ const exe_marker_len = "!!!THIS MARKS THE zig_exe_string MEMORY!!#".len;
 
 // I'm exporting this and making it mutable to make sure the compiler keeps it around
 // and prevent it from evaluting its contents at comptime
-export var zig_exe_string: [exe_marker_len + std.fs.MAX_PATH_BYTES + 1]u8 =
-    ("!!!THIS MARKS THE zig_exe_string MEMORY!!#" ++ ([1]u8{0} ** (std.fs.MAX_PATH_BYTES + 1))).*;
+export var zig_exe_string: [exe_marker_len + std.fs.max_path_bytes + 1]u8 =
+    ("!!!THIS MARKS THE zig_exe_string MEMORY!!#" ++ ([1]u8{0} ** (std.fs.max_path_bytes + 1))).*;
 
 const global = struct {
     var child: std.process.Child = undefined;
@@ -29,8 +29,8 @@ pub fn main() !u8 {
     var zig_exe_len: usize = 1;
     while (zig_exe_string[exe_marker_len + zig_exe_len] != 0) {
         zig_exe_len += 1;
-        if (exe_marker_len + zig_exe_len > std.fs.MAX_PATH_BYTES) {
-            log.err("the zig target execuable is either too big (over {}) or the exe is corrupt", .{std.fs.MAX_PATH_BYTES});
+        if (exe_marker_len + zig_exe_len > std.fs.max_path_bytes) {
+            log.err("the zig target execuable is either too big (over {}) or the exe is corrupt", .{std.fs.max_path_bytes});
             return 1;
         }
     }
@@ -46,8 +46,10 @@ pub fn main() !u8 {
     // NOTE: create the process.child before calling SetConsoleCtrlHandler because it uses it
     global.child = std.process.Child.init(args, global.arena);
 
-    if (0 == std.os.windows.SetConsoleCtrlHandler(consoleCtrlHandler, 1)) {
-        log.err("SetConsoleCtrlHandler failed, error={}", .{std.os.windows.kernel32.GetLastError()});
+    if (std.os.windows.SetConsoleCtrlHandler(consoleCtrlHandler, true)) |_| {
+
+    } else |err| {
+        log.err("SetConsoleCtrlHandler failed, error={}", .{err});
         return 0xff; // fail
     }
 
