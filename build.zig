@@ -41,7 +41,7 @@ fn addZigupExe(
     const known_folders = b.dependency("known-folders", .{}).module("known-folders");
     const exe = b.addExecutable(.{
         .name = "zigup",
-        .root_source_file = b.path("zigup.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -50,7 +50,7 @@ fn addZigupExe(
     if (target.result.os.tag == .windows) {
         const win32exelink = b.addExecutable(.{
             .name = "win32exelink",
-            .root_source_file = b.path("win32exelink.zig"),
+            .root_source_file = b.path("util/win32exelink.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -61,14 +61,11 @@ fn addZigupExe(
     }
     const tests = b.addTest(.{
         .name = "zigup-test",
-        .root_source_file = b.path("zigup.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-//     if (target.result.os.tag == .linux) {
-//         exe.use_llvm = false;
-//         exe.use_lld = false;
-//     }
+
     return .{
         .main = exe,
         .tests = tests,
@@ -99,7 +96,7 @@ fn ci(
 
     const archive_helper = b.addExecutable(.{
         .name = "archive-helper",
-        .root_source_file = b.path("archive.zig"),
+        .root_source_file = b.path("util/archive.zig"),
         .target = b.resolveTargetQuery(.{}),
         .optimize = .ReleaseFast,
     });

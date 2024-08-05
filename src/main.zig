@@ -3,9 +3,6 @@ const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 
-// TODO: see if removing this breaks anything
-// const fixdeletetree = @import("fixdeletetree.zig");
-
 const known_folders = @import("known-folders");
 
 const arch = switch (builtin.cpu.arch) {
