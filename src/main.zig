@@ -109,7 +109,7 @@ fn getDefaultInstallDir(allocator: Allocator) ![]const u8 {
     const install_dir = try std.fs.path.join(allocator, &[_][]const u8{ data_dir, "zigup" });
 
 
-    std.log.info("default install directory: '{s}'", .{install_dir});
+    std.log.debug("default install directory: '{s}'", .{install_dir});
     return install_dir;
 }
 
@@ -140,12 +140,12 @@ fn print_help() !void {
         \\  zigup fetch-mach-index        Download and print the index.json
         \\
         \\Options:
-        \\  --install-dir DIR             Install zig compilers in DIR
-        \\  --zig-symlink FILE_PATH       Path where the `zig` symlink will be placed, pointing to the default compiler
+        \\  --install-dir <DIR>           Install zig compilers in <DIR>
+        \\  --zig-symlink <FILE_PATH>     Path where the `zig` symlink will be placed, pointing to the default compiler
         \\                                This will typically be a file path within a PATH directory so that the user can just run `zig`
         \\                                Defaults to install-dir/zig
         \\
-        \\  --zls-symlink FILE_PATH       Path where the `zls` symlink will be placed, pointing to the default language server
+        \\  --zls-symlink <FILE_PATH>     Path where the `zls` symlink will be placed, pointing to the default language server
         \\                                This will typically be a file path within a PATH directory so that the user can just run `zig`
         \\                                Defaults to install-dir/zls
         \\
@@ -242,13 +242,14 @@ pub fn main() !void {
     std.process.argsFree(alloc, raw_args);
     defer cli.deinit(alloc);
 
+    const resolved_install_dir = cli.config.install_dir orelse try getDefaultInstallDir(alloc);
     const resolved_config: ResolvedZigupConfig = .{
-        .install_dir = cli.config.install_dir orelse try getDefaultInstallDir(alloc),
-        .zig_symlink = cli.config.zig_symlink,
-        .zls_symlink = cli.config.zls_symlink,
+        .install_dir = resolved_install_dir,
+        .zig_symlink = cli.config.zig_symlink orelse try std.fs.path.join(alloc, &.{ resolved_install_dir, "zig" }),
+        .zls_symlink = cli.config.zls_symlink orelse try std.fs.path.join(alloc, &.{ resolved_install_dir, "zls" }),
     };
     defer resolved_config.deinit(alloc);
-    cli.config = .{};
+    cli.config = .{}; // don't deinit twice
 
     var index_downloads: IndexDownloads = .{
         .mach = null,
@@ -260,38 +261,36 @@ pub fn main() !void {
         .download_default => |arg| {
             const version = try resolveVersion(alloc, &index_downloads, resolved_config, arg.version);
             defer version.deinit(alloc);
-            try fetchCompiler(alloc, resolved_config, version, .set_default);
+            try fetchVersion(alloc, resolved_config, version, .set_default);
         },
         .fetch => |arg| {
             const version = try resolveVersion(alloc, &index_downloads, resolved_config, arg.version);
             defer version.deinit(alloc);
-            try fetchCompiler(alloc, resolved_config, version, .leave_default);
+            try fetchVersion(alloc, resolved_config, version, .leave_default);
         },
         .keep => |arg| {
             const version = try resolveVersion(alloc, &index_downloads, resolved_config, arg.version);
             defer version.deinit(alloc);
-            try keepCompiler(resolved_config, version);
+            try keepVersion(resolved_config, version);
         },
         .default => |arg| {
             if (arg.version) |version| {
                 const resolved_version = try resolveVersion(alloc, &index_downloads, resolved_config, version);
                 defer resolved_version.deinit(alloc);
 
-                const compiler_dir = try std.fs.path.join(alloc, &[_][]const u8{ resolved_config.install_dir, resolved_version.string });
-                defer alloc.free(compiler_dir);
-                try setDefaultCompiler(alloc, compiler_dir, .verify_existence);
+                try setDefaultVersion(alloc, resolved_config, resolved_version);
             } else {
-                try printDefaultCompiler(alloc);
+                try printDefaultVersion(alloc, resolved_config);
             }
         },
         .clean => |arg| {
             if (std.mem.eql(u8, arg.version, "outdated")) {
-                try cleanOutdatedCompilers(alloc, resolved_config);
+                try cleanOutdatedVersions(alloc, resolved_config);
             } else {
                 const resolved_version = try resolveVersion(alloc, &index_downloads, resolved_config, arg.version);
                 defer resolved_version.deinit(alloc);
 
-                try cleanCompiler(resolved_config, resolved_version);
+                try cleanVersion(resolved_config, resolved_version);
             }
         },
 
@@ -303,7 +302,7 @@ pub fn main() !void {
         },
 
         .list => {
-            try listCompilers(resolved_config);
+            try listVersions(resolved_config);
         },
         .fetch_index => {
             var download_index = try fetchDownloadIndex(alloc, .zig);
@@ -536,12 +535,12 @@ const ZigupConfig = struct {
 };
 const ResolvedZigupConfig = struct {
     install_dir: []const u8,
-    zig_symlink: ?[]const u8 = null,
-    zls_symlink: ?[]const u8 = null,
+    zig_symlink: []const u8,
+    zls_symlink: []const u8,
     pub fn deinit(self: ResolvedZigupConfig, alloc: Allocator) void {
         alloc.free(self.install_dir);
-        if (self.zig_symlink) |symlink| alloc.free(symlink);
-        if (self.zls_symlink) |symlink| alloc.free(symlink);
+        alloc.free(self.zig_symlink);
+        alloc.free(self.zls_symlink);
     }
 };
 fn parseConfigFile(alloc: Allocator, reader: anytype) !ZigupConfig {
@@ -601,9 +600,6 @@ fn setDefaultConfig(alloc: Allocator, comptime key: ConfigKey, value: []const u8
     @field(config, @tagName(key)) = try alloc.dupe(u8, value);
 
     inline for (@typeInfo(@TypeOf(config)).Struct.fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, @tagName(key))) {
-
-        }
         if (@field(config, field.name)) |f| {
             try config_file.writer().print(field.name ++ "={s}", .{ f });
         }
@@ -761,6 +757,8 @@ pub fn runCompiler(alloc: Allocator, config: ResolvedZigupConfig, version: Resol
     };
 
     var argv = std.ArrayList([]const u8).init(alloc);
+    defer argv.deinit();
+
     try argv.append(try std.fs.path.join(alloc, &.{ compiler_path, "files", comptime "zig" ++ builtin.target.exeFileExt() }));
     try argv.appendSlice(args);
 
@@ -778,13 +776,15 @@ pub fn runCompiler(alloc: Allocator, config: ResolvedZigupConfig, version: Resol
 
 const SetDefault = enum { set_default, leave_default };
 
-fn fetchCompiler(alloc: Allocator, config: ResolvedZigupConfig, version: ResolvedVersion, set_default: SetDefault) !void {
+fn fetchVersion(alloc: Allocator, config: ResolvedZigupConfig, version: ResolvedVersion, set_default: SetDefault) !void {
     const compiler_dir = try std.fs.path.join(alloc, &[_][]const u8{ config.install_dir, version.string });
     defer alloc.free(compiler_dir);
     try installCompiler(alloc, compiler_dir, version.url orelse return error.NoVersionUrl);
 
+    // TODO: install ZLS
+
     if (set_default == .set_default) {
-        try setDefaultCompiler(alloc, compiler_dir, .existence_verified);
+        try setDefaultVersion(alloc, config, version);
     }
 }
 
@@ -837,7 +837,7 @@ const DownloadIndex = struct {
 //     }
 // };
 
-fn fetchDownloadIndex(alloc: Allocator, comptime url: enum { zig,mach }) !DownloadIndex {
+fn fetchDownloadIndex(alloc: Allocator, comptime url: enum { zig, mach }) !DownloadIndex {
     const url_string = switch (url) {
         .zig => zig_index_url,
         .mach => mach_index_url,
@@ -845,21 +845,19 @@ fn fetchDownloadIndex(alloc: Allocator, comptime url: enum { zig,mach }) !Downlo
     const text = switch (try downloadToString(alloc, url_string)) {
         .ok => |text| text,
         .err => |err| {
-            std.log.err("download '{s}' failed: {s}", .{url_string, err});
+            std.log.err("download '{s}' failed: {s}", .{ url_string, err });
             std.process.exit(1);
         },
     };
     errdefer alloc.free(text);
 
-    var json = try std.json.parseFromSlice(std.json.Value, alloc, text, .{
-//         .ignore_unknown_fields = true,
-    });
+    var json = try std.json.parseFromSlice(std.json.Value, alloc, text, .{});
     errdefer json.deinit();
 
     return DownloadIndex{ .text = text, .json = json };
 }
 
-fn listCompilers(config: ResolvedZigupConfig) !void {
+fn listVersions(config: ResolvedZigupConfig) !void {
     var install_dir = std.fs.cwd().openDir(config.install_dir, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return,
         else => return e,
@@ -892,7 +890,7 @@ fn listCompilers(config: ResolvedZigupConfig) !void {
     }
 }
 
-fn keepCompiler(config: ResolvedZigupConfig, compiler_version: ResolvedVersion) !void {
+fn keepVersion(config: ResolvedZigupConfig, compiler_version: ResolvedVersion) !void {
     var install_dir = try std.fs.cwd().openDir(config.install_dir, .{ .iterate = true });
     defer install_dir.close();
 
@@ -912,7 +910,7 @@ fn keepCompiler(config: ResolvedZigupConfig, compiler_version: ResolvedVersion) 
     keep_fd.close();
     std.log.info("created '{s}{c}{s}{c}{s}'", .{ config.install_dir, std.fs.path.sep, compiler_version.string, std.fs.path.sep, ".keep" });
 }
-fn cleanCompiler(config: ResolvedZigupConfig, version: ResolvedVersion) !void {
+fn cleanVersion(config: ResolvedZigupConfig, version: ResolvedVersion) !void {
     // TODO: if deleting symlinked, make sure to clean up the symlink
 
     var install_dir = std.fs.cwd().openDir(config.install_dir, .{ .iterate = true }) catch |e| switch (e) {
@@ -924,7 +922,7 @@ fn cleanCompiler(config: ResolvedZigupConfig, version: ResolvedVersion) !void {
     std.log.info("deleting '{s}{c}{s}'", .{ config.install_dir, std.fs.path.sep, version.string });
     try install_dir.deleteTree(version.string);
 }
-fn cleanOutdatedCompilers(alloc: Allocator, config: ResolvedZigupConfig) !void {
+fn cleanOutdatedVersions(alloc: Allocator, config: ResolvedZigupConfig) !void {
     // TODO: if deleting symlinked, make sure to clean up the symlink
     const latest = try latestInstalledVersion(alloc, config.install_dir, .none);
     defer if (latest) |l| alloc.free(l);
@@ -953,250 +951,91 @@ fn cleanOutdatedCompilers(alloc: Allocator, config: ResolvedZigupConfig) !void {
     }
 
 }
-fn readDefaultCompiler(alloc: Allocator, buffer: *[std.fs.max_path_bytes + 1]u8) !?[]const u8 {
-    _ = alloc;
-    _ = buffer;
-    @panic("Default compiler not implemented");
-//     const path_link = try makeZigPathLinkString(allocator);
-//     defer allocator.free(path_link);
-//
-//     if (builtin.os.tag == .windows) {
-//         var file = std.fs.openFileAbsolute(path_link, .{}) catch |e| switch (e) {
-//             error.FileNotFound => return null,
-//             else => return e,
-//         };
-//         defer file.close();
-//         try file.seekTo(win32exelink.exe_offset);
-//         const len = try file.readAll(buffer);
-//         if (len != buffer.len) {
-//             std.log.err("path link file '{s}' is too small", .{path_link});
-//             std.process.exit(1);
-//         }
-//         const target_exe = std.mem.sliceTo(buffer, 0);
-//         return try allocator.dupe(u8, targetPathToVersion(target_exe));
-//     }
-//
-//     const target_path = std.fs.readLinkAbsolute(path_link, buffer[0..std.fs.max_path_bytes]) catch |e| switch (e) {
-//         error.FileNotFound => return null,
-//         else => return e,
-//     };
-//     defer allocator.free(target_path);
-//     return try allocator.dupe(u8, targetPathToVersion(target_path));
-}
-// fn targetPathToVersion(target_path: []const u8) []const u8 {
-//     return std.fs.path.basename(std.fs.path.dirname(std.fs.path.dirname(target_path).?).?);
-// }
 
-fn getDefaultCompiler(allocator: Allocator) !?[]const u8 {
-    var buffer: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const slice_path = (try readDefaultCompiler(allocator, &buffer)) orelse return null;
-    const path_to_return = try allocator.alloc(u8, slice_path.len);
-    @memcpy(path_to_return, slice_path);
-    return path_to_return;
+fn installPathToVersion(target_path: []const u8) []const u8 {
+    // file tree: $install-dir/zig-<version>/files/zig
+    return std.fs.path.basename(std.fs.path.dirname(std.fs.path.dirname(target_path) orelse return "") orelse return "");
 }
 
-fn printDefaultCompiler(allocator: Allocator) !void {
-    const default_compiler_opt = try getDefaultCompiler(allocator);
-    defer if (default_compiler_opt) |default_compiler| allocator.free(default_compiler);
+fn getDefaultVersion(alloc: Allocator, config: ResolvedZigupConfig) !?[]const u8 {
+    var buffer: [std.fs.max_path_bytes]u8 = .{ undefined } ** std.fs.max_path_bytes;
+
+    if (builtin.os.tag == .windows) {
+        var file = std.fs.openFileAbsolute(config.zig_symlink, .{}) catch |e| switch (e) {
+            error.FileNotFound => return null,
+            else => return e,
+        };
+        defer file.close();
+
+        // file path is embedded in executable
+        try file.seekTo(win32exelink.exe_offset);
+        const len = try file.readAll(buffer);
+        if (len != buffer.len) {
+            std.log.err("path link file '{s}' is possibly corrupted", .{ config.zig_symlink });
+            std.process.exit(1);
+        }
+        // slice until null terminator
+        const target_exe = std.mem.sliceTo(buffer, 0);
+        return try alloc.dupe(u8, installPathToVersion(target_exe));
+    } else {
+        const default_zig_path = std.fs.readLinkAbsolute(config.zig_symlink, &buffer) catch |e| switch (e) {
+            error.FileNotFound => return null,
+            else => return e,
+        };
+        defer alloc.free(default_zig_path);
+        // Linux (and possibly other systems) truncates the output to the size of the buffer if it overflows
+        // https://github.com/ziglang/zig/issues/19137
+        if (default_zig_path.len == buffer.len) {
+            std.log.err("path to default zig is too long", .{});
+            std.process.exit(1);
+        }
+        return try alloc.dupe(u8, installPathToVersion(default_zig_path));
+    }
+}
+
+fn printDefaultVersion(alloc: Allocator, config: ResolvedZigupConfig) !void {
+    const default_compiler_opt = try getDefaultVersion(alloc, config);
+    defer if (default_compiler_opt) |default_compiler| alloc.free(default_compiler);
     const stdout = std.io.getStdOut().writer();
     if (default_compiler_opt) |default_compiler| {
         try stdout.print("{s}\n", .{default_compiler});
     } else {
-        try stdout.writeAll("<no-default>\n");
+        try stdout.writeAll("<no default version>\n");
     }
 }
 
-const ExistVerify = enum { existence_verified, verify_existence };
+fn setDefaultVersion(alloc: Allocator, config: ResolvedZigupConfig, version: ResolvedVersion) !void {
 
-fn setDefaultCompiler(allocator: Allocator, compiler_dir: []const u8, exist_verify: ExistVerify) !void {
-    _ = allocator;
-    _ = compiler_dir;
-    _ = exist_verify;
-    @panic("Default compiler not implemented");
-//     switch (exist_verify) {
-//         .existence_verified => {},
-//         .verify_existence => {
-//             var dir = std.fs.cwd().openDir(compiler_dir, .{}) catch |err| switch (err) {
-//                 error.FileNotFound => {
-//                     std.log.err("compiler '{s}' is not installed", .{std.fs.path.basename(compiler_dir)});
-//                     std.process.exit(1);
-//                 },
-//                 else => |e| return e,
-//             };
-//             dir.close();
-//         },
-//     }
-//
-//     const path_link = try makeZigPathLinkString(allocator);
-//     defer allocator.free(path_link);
-//
-//     const link_target = try std.fs.path.join(allocator, &[_][]const u8{ compiler_dir, "files", comptime "zig" ++ builtin.target.exeFileExt() });
-//     defer allocator.free(link_target);
-//     if (builtin.os.tag == .windows) {
-//         try createExeLink(link_target, path_link);
-//     } else {
-//         _ = try loggyUpdateSymlink(link_target, path_link, .{});
-//     }
-//
-//     try verifyPathLink(allocator, path_link);
-}
+    const source_zig = try std.fs.path.join(alloc, &.{
+        config.install_dir, version.string, "files", comptime "zig" ++ builtin.target.exeFileExt()
+    });
+    defer alloc.free(source_zig);
 
-/// Verify that path_link will work.  It verifies that `path_link` is
-/// in PATH and there is no zig executable in an earlier directory in PATH.
-fn verifyPathLink(allocator: Allocator, path_link: []const u8) !void {
-    const path_link_dir = std.fs.path.dirname(path_link) orelse {
-        std.log.err("invalid '--path-link' '{s}', it must be a file (not the root directory)", .{path_link});
-        std.process.exit(1);
-    };
-
-    const path_link_dir_id = blk: {
-        var dir = std.fs.cwd().openDir(path_link_dir, .{}) catch |err| {
-            std.log.err("unable to open the path-link directory '{s}': {s}", .{ path_link_dir, @errorName(err) });
+    std.fs.cwd().access(source_zig, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.log.err("compiler '{s}' is not installed", .{ version.string });
             std.process.exit(1);
-        };
-        defer dir.close();
-        break :blk try FileId.initFromDir(dir, path_link);
+        },
+        else => |e| return e,
     };
 
+//     const source_zls = try std.fs.path.join(alloc, &.{
+//         config.install_dir, version.string, "zls" ++ builtin.target.exeFileExt()
+//     });
+//     defer alloc.free(source_zls);
+
+    std.log.debug("making symlink of {s} in {s}", .{ source_zig, config.zig_symlink });
+//     std.log.debug("making symlink of {s} in {s}", .{ source_zls, config.zls_symlink });
+
+    // TODO: why can't windows use a regular symlink?
     if (builtin.os.tag == .windows) {
-        const path_env = std.process.getEnvVarOwned(allocator, "PATH") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => return,
-            else => |e| return e,
-        };
-        defer allocator.free(path_env);
-
-        var free_pathext: ?[]const u8 = null;
-        defer if (free_pathext) |p| allocator.free(p);
-
-        const pathext_env = blk: {
-            if (std.process.getEnvVarOwned(allocator, "PATHEXT")) |env| {
-                free_pathext = env;
-                break :blk env;
-            } else |err| switch (err) {
-                error.EnvironmentVariableNotFound => break :blk "",
-                else => |e| return e,
-            }
-            break :blk "";
-        };
-
-        var path_it = std.mem.tokenizeScalar(u8, path_env, ';');
-        while (path_it.next()) |path| {
-            switch (try compareDir(path_link_dir_id, path)) {
-                .missing => continue,
-                // can't be the same directory because we were able to open and get
-                // the file id for path_link_dir_id
-                .access_denied => {},
-                .match => return,
-                .mismatch => {},
-            }
-            {
-                const exe = try std.fs.path.join(allocator, &.{ path, "zig" });
-                defer allocator.free(exe);
-                try enforceNoZig(path_link, exe);
-            }
-
-            var ext_it = std.mem.tokenizeScalar(u8, pathext_env, ';');
-            while (ext_it.next()) |ext| {
-                if (ext.len == 0) continue;
-                const basename = try std.mem.concat(allocator, u8, &.{ "zig", ext });
-                defer allocator.free(basename);
-
-                const exe = try std.fs.path.join(allocator, &.{ path, basename });
-                defer allocator.free(exe);
-
-                try enforceNoZig(path_link, exe);
-            }
-        }
+        try createExeLink(source_zig, config.zig_symlink);
+//         try createExeLink(source_zls, config.zls_symlink);
     } else {
-        var path_it = std.mem.tokenizeScalar(u8, std.posix.getenv("PATH") orelse "", ':');
-        while (path_it.next()) |path| {
-            switch (try compareDir(path_link_dir_id, path)) {
-                .missing => continue,
-                // can't be the same directory because we were able to open and get
-                // the file id for path_link_dir_id
-                .access_denied => {},
-                .match => return,
-                .mismatch => {},
-            }
-            const exe = try std.fs.path.join(allocator, &.{ path, "zig" });
-            defer allocator.free(exe);
-            try enforceNoZig(path_link, exe);
-        }
-    }
-
-    std.log.err("the path link '{s}' is not in PATH", .{path_link});
-    std.process.exit(1);
-}
-
-fn compareDir(dir_id: FileId, other_dir: []const u8) !enum { missing, access_denied, match, mismatch } {
-    var dir = std.fs.cwd().openDir(other_dir, .{}) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir, error.BadPathName => return .missing,
-        error.AccessDenied => return .access_denied,
-        else => |e| return e,
-    };
-    defer dir.close();
-    return if (dir_id.eql(try FileId.initFromDir(dir, other_dir))) .match else .mismatch;
-}
-
-fn enforceNoZig(path_link: []const u8, exe: []const u8) !void {
-    var file = std.fs.cwd().openFile(exe, .{}) catch |err| switch (err) {
-        error.FileNotFound, error.IsDir => return,
-        error.AccessDenied => return, // if there is a Zig it must not be accessible
-        else => |e| return e,
-    };
-    defer file.close();
-
-    // error only if it is an executable or if that can't be determined
-    const meta = file.metadata() catch {
-        std.log.err("zig compiler '{s}' is higher priority in PATH than the path-link '{s}'", .{ exe, path_link });
-    };
-    if (@TypeOf(meta.permissions().inner) == std.fs.File.PermissionsUnix) {
-        if ((meta.permissions().inner.mode & 0o111) != 0) {
-            std.log.err("zig compiler '{s}' is higher priority in PATH than the path-link '{s}'", .{ exe, path_link });
-        }
+        try std.fs.cwd().symLink(source_zig, config.zig_symlink, .{});
+//         try std.fs.cwd().symLink(source_zls, config.zls_symlink, .{});
     }
 }
-
-const FileId = struct {
-    dev: if (builtin.os.tag == .windows) u32 else blk: {
-        const st: std.posix.Stat = undefined;
-        break :blk @TypeOf(st.dev);
-    },
-    ino: if (builtin.os.tag == .windows) u64 else blk: {
-        const st: std.posix.Stat = undefined;
-        break :blk @TypeOf(st.ino);
-    },
-
-    pub fn initFromFile(file: std.fs.File, filename_for_error: []const u8) !FileId {
-        if (builtin.os.tag == .windows) {
-            var info: std.os.windows.BY_HANDLE_FILE_INFORMATION = undefined;
-            if (0 == std.os.windows.GetFileInformationByHandle(file.handle, &info)) {
-                std.log.err("GetFileInformationByHandle on '{s}' failed, error={}", .{ filename_for_error, std.os.windows.kernel32.GetLastError() });
-                std.process.exit(1);
-            }
-            return FileId{
-                .dev = info.dwVolumeSerialNumber,
-                .ino = (@as(u64, @intCast(info.nFileIndexHigh)) << 32) | @as(u64, @intCast(info.nFileIndexLow)),
-            };
-        }
-        const st = try std.posix.fstat(file.handle);
-        return FileId{
-            .dev = st.dev,
-            .ino = st.ino,
-        };
-    }
-
-    pub fn initFromDir(dir: std.fs.Dir, name_for_error: []const u8) !FileId {
-        if (builtin.os.tag == .windows) {
-            return initFromFile(std.fs.File{ .handle = dir.fd }, name_for_error);
-        }
-        return initFromFile(std.fs.File{ .handle = dir.fd }, name_for_error);
-    }
-
-    pub fn eql(self: FileId, other: FileId) bool {
-        return self.dev == other.dev and self.ino == other.ino;
-    }
-};
 
 const win32exelink = struct {
     const content = @embedFile("win32exelink");
@@ -1263,7 +1102,7 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
         }) {
             .ok => {},
             .err => |err| {
-                std.log.err("download '{s}' failed: {s}", .{url, err});
+                std.log.err("download '{s}' failed: {s}", .{ url, err });
                 // this removes the installing dir if the http request fails so we dont have random directories
                 try std.fs.cwd().deleteTree(installing_dir);
                 std.process.exit(1);
@@ -1318,8 +1157,6 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
         defer allocator.free(normalized_dir);
         try std.fs.cwd().rename(extracted_dir, normalized_dir);
     }
-
-    // TODO: write date information (so users can sort compilers by date)
 
     // finish installation by renaming the install dir
     try std.fs.cwd().rename(installing_dir, compiler_dir);

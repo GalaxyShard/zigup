@@ -5,11 +5,10 @@ const log = std.log.scoped(.zigexelink);
 
 // NOTE: to prevent the exe from having multiple markers, there can't be a separate string literal
 //       for the marker to get the length
-// TODO: check if this creates two strings in the binary
 const exe_marker_len = "!!!THIS MARKS THE zig_exe_string MEMORY!!#".len;
 
-// I'm exporting this and making it mutable to make sure the compiler keeps it around
-// and prevent it from evaluting its contents at comptime
+// This read-only memory is modified to be the symlink path
+// Export this as mutable to make sure the compiler keeps it around and does not comptime evaluate it
 export var zig_exe_string: [exe_marker_len + std.fs.max_path_bytes + 1]u8 =
     ("!!!THIS MARKS THE zig_exe_string MEMORY!!#" ++ ([1]u8{0} ** (std.fs.max_path_bytes + 1))).*;
 
@@ -63,9 +62,7 @@ pub fn main() !u8 {
 }
 
 fn consoleCtrlHandler(ctrl_type: u32) callconv(std.os.windows.WINAPI) std.os.windows.BOOL {
-    //
-    // NOTE: Do I need to synchronize this with the main thread?
-    //
+    // TODO: check if this needs to be synchronized with the main thread
     const name: []const u8 = switch (ctrl_type) {
         std.os.windows.CTRL_C_EVENT => "Control-C",
         std.os.windows.CTRL_BREAK_EVENT => "Break",
