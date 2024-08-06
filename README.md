@@ -1,6 +1,8 @@
 # zigup
 
-Download and manage zig compilers.
+Download and manage zig compilers and ZLS versions.
+
+Built-in support for Mach releases and ZLS (TODO: not implemented)
 
 # Building
 
@@ -10,10 +12,7 @@ Zigup is currently built/tested using zig master (0.14.0-dev).
 git clone https://github.com/galaxyshard/zigup
 cd zigup
 
-# Build in debug mode
-zig build
-
-# Build in release mode: ReleaseSafe, ReleaseFast, ReleaseSmall
+# Build in release mode
 zig build -Doptimize=ReleaseSafe
 ```
 
@@ -43,7 +42,7 @@ zigup list
 # Removes this compiler
 zigup clean <version>
 
-# mark a compiler to keep (TODO: currently does nothing)
+# mark a compiler to keep
 zigup keep <version>
 
 # run a specific version of the compiler
@@ -52,22 +51,21 @@ zigup run <version> <args>...
 
 # How the compilers are managed
 
-zigup stores each compiler and language server in a subdirectory of the installation directory, by default the data directory from [known-folders](https://github.com/ziglibs/known-folders).
+Zigup stores each compiler and language server in a subdirectory of the installation directory, by default the data directory from [known-folders](https://github.com/ziglibs/known-folders).
 
-(TODO: temporarily removed) Zigup can optionally symlink a "default" Zig/ZLS. On windows this will create an executable that forwards invocations to one of the `zig`/`zls` executables in the install directory.
+Zigup can optionally symlink a "default" Zig/ZLS. On windows this will create an executable that forwards invocations to one of the `zig`/`zls` executables in the install directory.
 
 Options can be configured via the following command line options:
 ```
 # Single-run
---install-dir DIR
-# TODO: these do nothing
---zig-symlink FILE_PATH
---zls-symlink FILE_PATH
+--install-dir <DIR>
+--zig-symlink <FILE_PATH>
+--zls-symlink <FILE_PATH>
 
 # Persist settings (saves in the default configuration directory from known-folders)
-zigup set-install-dir DIR
-zigup set-zig-symlink FILE_PATH
-zigup set-zls-symlink FILE_PATH
+zigup set-install-dir <DIR>
+zigup set-zig-symlink <FILE_PATH>
+zigup set-zls-symlink <FILE_PATH>
 ```
 
 # License
