@@ -627,20 +627,20 @@ fn latestInstalledVersion(alloc: Allocator, install_dir: []const u8, filter: enu
     while (try iter.next()) |entry| {
         if (entry.kind != .directory) continue;
 
-        if (std.SemanticVersion.parse(entry.name)) |found_version| {
+        if (std.SemanticVersion.parse(entry.name["zig-".len ..])) |found_version| {
             if (filter == .stable and (found_version.pre != null)) {
                 continue;
             }
 
             if (latest_found) |latest| {
-                const latest_version = try std.SemanticVersion.parse(latest);
+                const latest_version = try std.SemanticVersion.parse(latest["zig-".len ..]);
 
                 if (found_version.order(latest_version).compare(.gt)) {
                     alloc.free(latest);
-                    latest_found = try std.mem.concat(alloc, u8, &.{ "zig-", entry.name });
+                    latest_found = try alloc.dupe(u8, entry.name);
                 }
             } else {
-                latest_found = try std.mem.concat(alloc, u8, &.{ "zig-", entry.name });
+                latest_found = try alloc.dupe(u8, entry.name);
             }
 
         } else |_| {
