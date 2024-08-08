@@ -1032,6 +1032,10 @@ fn setDefaultVersion(alloc: Allocator, config: ResolvedZigupConfig, version: Res
         try createExeLink(source_zig, config.zig_symlink);
 //         try createExeLink(source_zls, config.zls_symlink);
     } else {
+        std.fs.cwd().deleteFile(config.zig_symlink) catch |e| switch (e) {
+            error.FileNotFound => {},
+            else => |e1| return e1,
+        };
         try std.fs.cwd().symLink(source_zig, config.zig_symlink, .{});
 //         try std.fs.cwd().symLink(source_zls, config.zls_symlink, .{});
     }
@@ -1069,7 +1073,6 @@ fn createExeLink(link_target: []const u8, path_link: []const u8) !void {
 }
 
 fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const u8) !void {
-
     if (std.fs.cwd().access(compiler_dir, .{})) |_| {
         std.log.info("compiler '{s}' already installed", .{compiler_dir});
         return;
