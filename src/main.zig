@@ -205,23 +205,88 @@ const Cli = struct {
     }
 };
 const IndexDownloads = struct {
-    mach: ?std.json.Parsed(std.json.Value),
-    zig: ?std.json.Parsed(std.json.Value),
+    const Type = std.json.Value;
+    mach: ?std.json.Parsed(Type),
+    zig: ?std.json.Parsed(Type),
 
-    pub fn getZig(self: *IndexDownloads, alloc: Allocator) !*std.json.Parsed(std.json.Value) {
-        if (self.zig) |_| return &self.zig.?;
+    const GetIndexError = error{
+        NoCacheDirectory,
+        DownloadFailed,
+        WriteCacheFailed,
+        ReadCacheFailed
 
-        const index = try fetchDownloadIndex(alloc, .zig);
-        self.zig = index.json;
-        return &self.zig.?;
+    } || Allocator.Error;
+
+    pub fn get(
+        self: *IndexDownloads,
+        alloc: Allocator,
+        comptime index_type: IndexType,
+        use_cache: MayCache
+    ) GetIndexError!*std.json.Parsed(Type) {
+        const field = @tagName(index_type); // zig, mach
+        const cache_file_path = "zigup/index-" ++ field ++ ".json";
+
+        if (@field(self, field)) |_| return &@field(self, field).?;
+
+        var cache_dir: std.fs.Dir = known_folders.open(alloc, .cache, .{})
+            catch { return error.NoCacheDirectory; }
+            orelse return error.NoCacheDirectory;
+        defer cache_dir.close();
+
+
+        if (use_cache == .no_cache) {
+            return self.fetchAndCache(alloc, cache_dir, index_type);
+        }
+        if (cache_dir.openFile(cache_file_path, .{})) |cache_file| {
+            defer cache_file.close();
+
+            var reader = std.json.reader(alloc, cache_file.reader());
+            const cached_json = std.json.parseFromTokenSource(Type, alloc, &reader, .{});
+
+            if (cached_json) |json| {
+                @field(self, field) = json;
+                return &@field(self, field).?;
+            } else |e| {
+                std.log.err("failed to read index cache: {}; refreshing", .{e});
+                return self.fetchAndCache(alloc, cache_dir, index_type);
+            }
+
+
+        } else |e| switch (e) {
+            error.FileNotFound => return self.fetchAndCache(alloc, cache_dir, index_type),
+            else => return error.ReadCacheFailed,
+        }
     }
-    pub fn getMach(self: *IndexDownloads, alloc: Allocator) !*std.json.Parsed(std.json.Value) {
-        if (self.mach) |_| return &self.mach.?;
 
-        const index = try fetchDownloadIndex(alloc, .mach);
-        self.mach = index.json;
-        return &self.mach.?;
+    fn fetchAndCache(
+        self: *IndexDownloads,
+        alloc: Allocator,
+        cache_dir: std.fs.Dir,
+        comptime index_type: IndexType
+    ) GetIndexError!*std.json.Parsed(Type) {
+        const field = @tagName(index_type); // zig, mach
+        const cache_file_path = "zigup/index-" ++ field ++ ".json";
+
+
+        const index = fetchDownloadIndex(alloc, index_type)
+            catch return error.DownloadFailed;
+        errdefer index.deinit(alloc);
+
+        cache_dir.makeDir("zigup") catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return error.WriteCacheFailed,
+        };
+
+        const file = cache_dir.createFile(cache_file_path, .{})
+            catch return error.WriteCacheFailed;
+        defer file.close();
+
+        file.writeAll(index.text) catch return error.WriteCacheFailed;
+
+        @field(self, field) = index.json;
+        return &@field(self, field).?;
     }
+
     pub fn deinit(self: IndexDownloads) void {
         if (self.mach) |m| m.deinit();
         if (self.zig) |z| z.deinit();
@@ -251,34 +316,28 @@ pub fn main() !void {
     defer resolved_config.deinit(alloc);
     cli.config = .{}; // don't deinit twice
 
-    var index_downloads: IndexDownloads = .{
-        .mach = null,
-        .zig = null,
-    };
-    defer index_downloads.deinit();
-
     switch (cli.action) {
         .download_default => |arg| {
-            const version = try resolveVersion(alloc, &index_downloads, resolved_config, arg.version);
-            defer version.deinit(alloc);
-            try fetchVersion(alloc, resolved_config, version, .set_default);
+            var version = try LazyVersion.init(alloc, arg.version);
+            defer version.deinit();
+            try fetchVersion(alloc, resolved_config, &version, .set_default);
         },
         .fetch => |arg| {
-            const version = try resolveVersion(alloc, &index_downloads, resolved_config, arg.version);
-            defer version.deinit(alloc);
-            try fetchVersion(alloc, resolved_config, version, .leave_default);
+            var version = try LazyVersion.init(alloc, arg.version);
+            defer version.deinit();
+            try fetchVersion(alloc, resolved_config, &version, .leave_default);
         },
         .keep => |arg| {
-            const version = try resolveVersion(alloc, &index_downloads, resolved_config, arg.version);
-            defer version.deinit(alloc);
-            try keepVersion(resolved_config, version);
+            var version = try LazyVersion.init(alloc, arg.version);
+            defer version.deinit();
+            try keepVersion(resolved_config, &version);
         },
         .default => |arg| {
             if (arg.version) |version| {
-                const resolved_version = try resolveVersion(alloc, &index_downloads, resolved_config, version);
-                defer resolved_version.deinit(alloc);
+                var lazy_version = try LazyVersion.init(alloc, version);
+                defer lazy_version.deinit();
 
-                try setDefaultVersion(alloc, resolved_config, resolved_version);
+                try setDefaultVersion(alloc, resolved_config, &lazy_version);
             } else {
                 try printDefaultVersion(alloc, resolved_config);
             }
@@ -287,18 +346,18 @@ pub fn main() !void {
             if (std.mem.eql(u8, arg.version, "outdated")) {
                 try cleanOutdatedVersions(alloc, resolved_config);
             } else {
-                const resolved_version = try resolveVersion(alloc, &index_downloads, resolved_config, arg.version);
-                defer resolved_version.deinit(alloc);
+                var version = try LazyVersion.init(alloc, arg.version);
+                defer version.deinit();
 
-                try cleanVersion(resolved_config, resolved_version);
+                try cleanVersion(resolved_config, &version);
             }
         },
 
         .run => |args| {
-            const version = try resolveVersion(alloc, &index_downloads, resolved_config, args.version);
-            defer version.deinit(alloc);
+            var version = try LazyVersion.init(alloc, args.version);
+            defer version.deinit();
 
-            _ = try runCompiler(alloc, resolved_config, version, args.zig_args);
+            _ = try runCompiler(alloc, resolved_config, &version, args.zig_args);
         },
 
         .list => {
@@ -389,7 +448,7 @@ fn parseCliArgs(alloc: Allocator, args: []const []const u8) !Cli {
 
                 const action = .{ .run = .{
                     .version = version,
-                    .zig_args = args[i+2..],
+                    .zig_args = zig_args,
                 } };
                 // all arguments after run are passed to Zig
                 return .{
@@ -606,25 +665,238 @@ fn setDefaultConfig(alloc: Allocator, comptime key: ConfigKey, value: []const u8
     }
 }
 
-const ResolvedVersion = struct {
-    string: []const u8,
-    url: ?[]const u8,
+const LazyVersion = struct {
+    alloc: Allocator,
+    raw: []const u8,
 
-    pub fn deinit(self: ResolvedVersion, alloc: Allocator) void {
-        alloc.free(self.string);
-        if (self.url) |url| alloc.free(url);
+    index: IndexDownloads = .{ .mach = null, .zig = null },
+    id: ?[]const u8 = null,
+    url: ?[]const u8 = null,
+    date: ?[]const u8 = null,
+
+    resolve_error: ?ResolveError = null,
+
+    pub fn init(alloc: Allocator, raw_version: []const u8) !LazyVersion {
+        const v = (
+            if (std.mem.startsWith(u8, raw_version, "zig-"))
+                raw_version["zig-".len ..]
+            else
+                raw_version
+        );
+
+        return .{
+            .alloc = alloc,
+            .raw = try alloc.dupe(u8, v),
+        };
+    }
+    pub fn deinit(self: LazyVersion) void {
+        self.alloc.free(self.raw);
+
+        self.index.deinit();
+        if (self.id) |a| self.alloc.free(a);
+        if (self.url) |a| self.alloc.free(a);
+        if (self.date) |a| self.alloc.free(a);
+    }
+    const ResolveError = error{
+        NoDate,
+        NoInstalledVersions,
+        InvalidIndexJson,
+        UnsupportedSystem,
+        InvalidVersion,
+        FailedInstallSearch,
+    } || Allocator.Error || IndexDownloads.GetIndexError;
+
+    pub fn resolveAll(self: *LazyVersion, config: ResolvedZigupConfig) ResolveError!void {
+        if (self.resolve_error) |e| {
+            return e;
+        }
+
+        if (self.resolveAllInner(config)) {
+            return;
+        } else |e| {
+            self.resolve_error = e;
+            return e;
+        }
+    }
+    fn urlFromId(alloc: Allocator, id: []const u8) ![]const u8 {
+        const version = id["zig-".len..];
+        return std.mem.concat(alloc, u8, &.{
+            "https://ziglang.org/builds/zig-" ++ os ++ "-" ++ arch ++ "-",
+            version,
+            (if (builtin.os.tag == .windows) ".zip" else ".tar.xz"),
+        });
+    }
+    fn resolveAllInner(self: *LazyVersion, config: ResolvedZigupConfig) ResolveError!void {
+        if (std.mem.eql(u8, self.raw, "stable")) {
+            try self.findStable();
+
+        } else if (std.mem.eql(u8, self.raw, "master")) {
+            try self.findFromIndex(.zig, .no_cache);
+
+        } else if (std.mem.eql(u8, self.raw, "latest-installed")) {
+            const latest_found = try latestInstalledVersion(self.alloc, config.install_dir, .no_filter);
+
+            self.id = latest_found;
+            self.url = try urlFromId(self.alloc, latest_found);
+            // Unless latest-installed is master or a stable/nominated version, it is impossible to find the date/url without saving it during install
+            // This should not be necessary anyways; date is only needed while installing zls
+            return error.NoDate;
+
+        } else if (std.mem.eql(u8, self.raw, "mach-latest")) {
+            try self.findFromIndex(.mach, .no_cache);
+
+        } else if (std.mem.endsWith(u8, self.raw, "-mach")) {
+            try self.findFromIndex(.mach, .cache);
+
+        } else {
+            // validate this is a valid version number
+            _ = std.SemanticVersion.parse(self.raw) catch return error.InvalidVersion;
+            self.id = try std.mem.concat(self.alloc, u8, &.{ "zig-", self.raw });
+            self.url = try urlFromId(self.alloc, self.id.?);
+
+            self.findFromIndex(.zig, .cache) catch |e| switch (e) {
+                error.InvalidVersion => {
+                    // No entry in index.json was found, but this is
+                    // a valid semantic version and may be a dev release
+                    // or the cache hasn't been cleared
+                    return error.NoDate;
+                },
+                else => return e,
+            };
+        }
+    }
+    pub fn resolveId(self: *LazyVersion, config: ResolvedZigupConfig) ResolveError![]const u8 {
+        if (self.id) |v| {
+            return v;
+        }
+        self.resolveAll(config) catch |e| switch (e) {
+            error.NoDate => {},
+            else => return e,
+        };
+        return self.id.?;
+    }
+    pub fn resolveUrl(self: *LazyVersion, config: ResolvedZigupConfig) ResolveError![]const u8 {
+        if (self.url) |v| {
+            return v;
+        }
+        self.resolveAll(config) catch |e| switch (e) {
+            error.NoDate => {},
+            else => return e,
+        };
+        return self.url.?;
+    }
+    pub fn resolveDate(self: *LazyVersion, config: ResolvedZigupConfig) ResolveError![]const u8 {
+        if (self.date) |v| {
+            return v;
+        }
+        try self.resolveAll(config);
+        return self.date.?;
+    }
+
+    fn findStable(self: *LazyVersion) ResolveError!void {
+        var latest_found: ?std.SemanticVersion = null;
+
+        var id = try std.ArrayList(u8).initCapacity(self.alloc, "zig-0.00.0".len);
+        var url = std.ArrayList(u8).init(self.alloc);
+        var date = try std.ArrayList(u8).initCapacity(self.alloc, "0000-00-00".len);
+        defer {
+            id.deinit();
+            url.deinit();
+            date.deinit();
+        }
+
+        var iter = (try self.index.get(self.alloc, .zig, .no_cache)).value.object.iterator();
+        while (iter.next()) |pair| {
+            // note: version is invalidated alongside pair.key_ptr
+            if (std.SemanticVersion.parse(pair.key_ptr.*)) |version| {
+                // ignore prereleases
+                if (version.pre != null) {
+                    continue;
+                }
+                if (latest_found == null or version.order(latest_found.?).compare(.gt)) {
+
+                    id.clearRetainingCapacity();
+                    try id.appendSlice("zig-");
+                    try id.appendSlice(pair.key_ptr.*);
+                    // parse it again; key_ptr and it's parsed semantic version is invalidated each iteration
+                    latest_found = std.SemanticVersion.parse(id.items["zig-".len ..])
+                        catch unreachable;
+
+                    const new_date = pair.value_ptr.object.get("date")
+                        orelse return error.InvalidIndexJson;
+
+                    date.clearRetainingCapacity();
+                    try date.appendSlice(new_date.string);
+
+                    const compiler = pair.value_ptr.object.get(json_platform)
+                        orelse return error.UnsupportedSystem;
+                    const tarball = compiler.object.get("tarball")
+                        orelse return error.InvalidIndexJson;
+
+                    url.clearRetainingCapacity();
+                    try url.appendSlice(tarball.string);
+
+                }
+            } else |_| {
+                continue;
+            }
+        }
+        self.id = try id.toOwnedSlice();
+        self.url = try url.toOwnedSlice();
+        self.date = try date.toOwnedSlice();
+    }
+    fn findFromIndex(self: *LazyVersion, comptime index_type: IndexType, may_cache: MayCache) ResolveError!void {
+        const index = try self.index.get(self.alloc, index_type, may_cache);
+        if (index.value != .object) return error.InvalidIndexJson;
+
+        const version_info = index.value.object.get(self.raw) orelse return error.InvalidVersion;
+        if (version_info != .object) return error.InvalidIndexJson;
+
+        const version_id = version_info.object.get("version");
+
+        const date = version_info.object.get("date") orelse return error.InvalidIndexJson;
+        if (date != .string) return error.InvalidIndexJson;
+
+        const compiler = version_info.object.get(json_platform) orelse return error.UnsupportedSystem;
+        if (compiler != .object) return error.InvalidIndexJson;
+
+        const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
+        if (tarball != .string) return error.InvalidIndexJson;
+
+        if (version_id) |v| {
+            if (v != .string) return error.InvalidIndexJson;
+
+            self.id = try std.mem.concat(self.alloc, u8, &.{ "zig-", v.string });
+        } else {
+            // "version" is not in the version info if the version is the key (self.raw)
+            // validate this is a valid version number
+            _ = std.SemanticVersion.parse(self.raw) catch return error.InvalidVersion;
+
+            self.id = try std.mem.concat(self.alloc, u8, &.{ "zig-", self.raw });
+        }
+        self.url = try self.alloc.dupe(u8, tarball.string);
+        self.date = try self.alloc.dupe(u8, date.string);
     }
 };
-fn latestInstalledVersion(alloc: Allocator, install_dir: []const u8, filter: enum { none, stable }) !?[]const u8 {
-    var directory = try std.fs.cwd().openDir(install_dir, .{
+const MayCache = enum { cache, no_cache };
+
+fn latestInstalledVersion(
+    alloc: Allocator,
+    install_dir: []const u8,
+    filter: enum { no_filter, stable }
+) LazyVersion.ResolveError ![]const u8 {
+    var directory = std.fs.cwd().openDir(install_dir, .{
         .iterate = true,
-    });
+    }) catch |e| switch (e) {
+        error.FileNotFound => return error.NoInstalledVersions,
+        else => return error.FailedInstallSearch,
+    };
     defer directory.close();
 
     var latest_found: ?[]const u8 = null;
 
     var iter = directory.iterate();
-    while (try iter.next()) |entry| {
+    while (iter.next() catch return error.FailedInstallSearch) |entry| {
         if (entry.kind != .directory) continue;
 
         if (std.SemanticVersion.parse(entry.name["zig-".len ..])) |found_version| {
@@ -633,7 +905,8 @@ fn latestInstalledVersion(alloc: Allocator, install_dir: []const u8, filter: enu
             }
 
             if (latest_found) |latest| {
-                const latest_version = try std.SemanticVersion.parse(latest["zig-".len ..]);
+                const latest_version = std.SemanticVersion.parse(latest["zig-".len ..])
+                    catch unreachable;
 
                 if (found_version.order(latest_version).compare(.gt)) {
                     alloc.free(latest);
@@ -647,110 +920,17 @@ fn latestInstalledVersion(alloc: Allocator, install_dir: []const u8, filter: enu
             continue;
         }
     }
-    return latest_found;
-}
-fn resolveVersion(alloc: Allocator, indexes: *IndexDownloads, config: ResolvedZigupConfig, raw_version: []const u8) !ResolvedVersion {
-    if (std.mem.eql(u8, raw_version, "stable")) {
-        var latest_found: ?std.SemanticVersion = null;
-
-        var string = try std.ArrayList(u8).initCapacity(alloc, 11);
-        var url = std.ArrayList(u8).init(alloc);
-
-        var iter = (try indexes.getZig(alloc)).value.object.iterator();
-        while (iter.next()) |pair| {
-            // note: version is invalidated alongside pair.key_ptr
-            if (std.SemanticVersion.parse(pair.key_ptr.*)) |version| {
-                // ignore prereleases
-                if (version.pre != null) {
-                    continue;
-                }
-                if (latest_found == null or version.order(latest_found.?).compare(.gt)) {
-                    // build is a slice of the key, which is invalidated each iteration
-                    string.clearRetainingCapacity();
-                    try string.appendSlice("zig-");
-                    try string.appendSlice(pair.key_ptr.*);
-
-
-                    latest_found = try std.SemanticVersion.parse(string.items["zig-".len ..]);
-
-                    const compiler = pair.value_ptr.object.get(json_platform) orelse return error.UnsupportedSystem;
-                    const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
-
-                    url.clearRetainingCapacity();
-                    try url.appendSlice(tarball.string);
-
-                }
-            } else |_| {
-                continue;
-            }
-        }
-
-        return .{
-            .string = try string.toOwnedSlice(),
-            .url = try url.toOwnedSlice(),
-        };
-
-    } else if (std.mem.eql(u8, raw_version, "master")) {
-        const master = (try indexes.getZig(alloc)).value.object.get("master") orelse return error.InvalidIndexJson;
-        const version = master.object.get("version") orelse return error.InvalidIndexJson;
-
-        const compiler = master.object.get(json_platform) orelse return error.UnsupportedSystem;
-        const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
-
-
-        return .{
-            .string = try std.mem.concat(alloc, u8, &.{ "zig-", version.string }),
-            .url = try alloc.dupe(u8, tarball.string),
-        };
-
-
-    } else if (std.mem.eql(u8, raw_version, "latest-installed")) {
-        const latest_found = try latestInstalledVersion(alloc, config.install_dir, .none);
-        return .{
-            .string = latest_found orelse return error.NoInstalledVersions,
-            .url = null,
-        };
-
-    } else if (std.mem.eql(u8, raw_version, "mach-latest")) {
-        const mach_latest = (try indexes.getMach(alloc)).value.object.get("mach-latest") orelse return error.InvalidIndexJson;
-        const version = mach_latest.object.get("version") orelse return error.InvalidIndexJson;
-
-        const compiler = mach_latest.object.get(json_platform) orelse return error.UnsupportedSystem;
-        const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
-
-        return .{
-            .string = try std.mem.concat(alloc, u8, &.{ "zig-", version.string }),
-            .url = try alloc.dupe(u8, tarball.string),
-        };
-
-    } else if (std.mem.endsWith(u8, raw_version, "-mach")) {
-        const json = (try indexes.getMach(alloc)).value.object.get(raw_version) orelse return error.InvalidVersion;
-        const compiler = json.object.get(json_platform) orelse return error.UnsupportedSystem;
-        const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
-        return .{
-            .string = try std.mem.concat(alloc, u8, &.{ "zig-", raw_version }),
-            .url = try alloc.dupe(u8, tarball.string),
-        };
-
-    } else {
-
-        const json = (try indexes.getZig(alloc)).value.object.get(raw_version) orelse return error.InvalidVersion;
-        const compiler = json.object.get(json_platform) orelse return error.UnsupportedSystem;
-        const tarball = compiler.object.get("tarball") orelse return error.InvalidIndexJson;
-        return .{
-            .string = try std.mem.concat(alloc, u8, &.{ "zig-", raw_version }),
-            .url = try alloc.dupe(u8, tarball.string),
-        };
-    }
+    return latest_found orelse error.NoInstalledVersions;
 }
 
-pub fn runCompiler(alloc: Allocator, config: ResolvedZigupConfig, version: ResolvedVersion, args: []const []const u8) !u8 {
-    const compiler_path = try std.fs.path.join(alloc, &[_][]const u8{ config.install_dir, version.string });
+pub fn runCompiler(alloc: Allocator, config: ResolvedZigupConfig, version: *LazyVersion, args: []const []const u8) !u8 {
+    const id = try version.resolveId(config);
+    const compiler_path = try std.fs.path.join(alloc, &[_][]const u8{ config.install_dir, id });
     defer alloc.free(compiler_path);
 
     std.fs.cwd().access(compiler_path, .{}) catch |e| switch (e) {
         error.FileNotFound => {
-            std.log.err("compiler '{s}' does not exist, fetch it first with: zigup fetch {0s}", .{ version.string });
+            std.log.err("compiler '{s}' does not exist, fetch it first with: zigup fetch {0s}", .{ id });
             std.process.exit(1);
         },
         else => {},
@@ -762,6 +942,7 @@ pub fn runCompiler(alloc: Allocator, config: ResolvedZigupConfig, version: Resol
     try argv.append(try std.fs.path.join(alloc, &.{ compiler_path, "files", comptime "zig" ++ builtin.target.exeFileExt() }));
     try argv.appendSlice(args);
 
+    std.debug.print("test: {s}\n", .{ args });
     // TODO: use "execve" if on linux
     var proc = std.process.Child.init(argv.items, alloc);
     const ret_val = try proc.spawnAndWait();
@@ -776,12 +957,17 @@ pub fn runCompiler(alloc: Allocator, config: ResolvedZigupConfig, version: Resol
 
 const SetDefault = enum { set_default, leave_default };
 
-fn fetchVersion(alloc: Allocator, config: ResolvedZigupConfig, version: ResolvedVersion, set_default: SetDefault) !void {
-    const compiler_dir = try std.fs.path.join(alloc, &[_][]const u8{ config.install_dir, version.string });
+fn fetchVersion(alloc: Allocator, config: ResolvedZigupConfig, version: *LazyVersion, set_default: SetDefault) !void {
+    // TODO: detect interuptions
+    const version_id = try version.resolveId(config);
+    const url = try version.resolveUrl(config);
+
+    const compiler_dir = try std.fs.path.join(alloc, &[_][]const u8{ config.install_dir, version_id });
     defer alloc.free(compiler_dir);
-    try installCompiler(alloc, compiler_dir, version.url orelse return error.NoVersionUrl);
+    try installCompiler(alloc, compiler_dir, url);
 
     // TODO: install ZLS
+    try installZls(alloc, config, version);
 
     if (set_default == .set_default) {
         try setDefaultVersion(alloc, config, version);
@@ -836,8 +1022,8 @@ const DownloadIndex = struct {
 //         return self;
 //     }
 // };
-
-fn fetchDownloadIndex(alloc: Allocator, comptime url: enum { zig, mach }) !DownloadIndex {
+const IndexType = enum { zig, mach };
+fn fetchDownloadIndex(alloc: Allocator, comptime url: IndexType) !DownloadIndex {
     const url_string = switch (url) {
         .zig => zig_index_url,
         .mach => mach_index_url,
@@ -890,13 +1076,14 @@ fn listVersions(config: ResolvedZigupConfig) !void {
     }
 }
 
-fn keepVersion(config: ResolvedZigupConfig, compiler_version: ResolvedVersion) !void {
+fn keepVersion(config: ResolvedZigupConfig, version: *LazyVersion) !void {
+    const version_id = try version.resolveId(config);
     var install_dir = try std.fs.cwd().openDir(config.install_dir, .{ .iterate = true });
     defer install_dir.close();
 
-    var compiler_dir = install_dir.openDir(compiler_version.string, .{}) catch |e| switch (e) {
+    var compiler_dir = install_dir.openDir(version_id, .{}) catch |e| switch (e) {
         error.FileNotFound => {
-            std.log.info("compiler {s} not installed", .{compiler_version.string});
+            std.log.info("compiler {s} not installed", .{version_id});
             std.process.exit(1);
         },
         else => return e,
@@ -908,10 +1095,11 @@ fn keepVersion(config: ResolvedZigupConfig, compiler_version: ResolvedVersion) !
         else => |e2| return e2,
     };
     keep_fd.close();
-    std.log.info("created '{s}{c}{s}{c}{s}'", .{ config.install_dir, std.fs.path.sep, compiler_version.string, std.fs.path.sep, ".keep" });
+    std.log.info("created '{s}{c}{s}{c}{s}'", .{ config.install_dir, std.fs.path.sep, version_id, std.fs.path.sep, ".keep" });
 }
-fn cleanVersion(config: ResolvedZigupConfig, version: ResolvedVersion) !void {
+fn cleanVersion(config: ResolvedZigupConfig, version: *LazyVersion) !void {
     // TODO: if deleting symlinked, make sure to clean up the symlink
+    const version_id = try version.resolveId(config);
 
     var install_dir = std.fs.cwd().openDir(config.install_dir, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return,
@@ -919,15 +1107,23 @@ fn cleanVersion(config: ResolvedZigupConfig, version: ResolvedVersion) !void {
     };
     defer install_dir.close();
 
-    std.log.info("deleting '{s}{c}{s}'", .{ config.install_dir, std.fs.path.sep, version.string });
-    try install_dir.deleteTree(version.string);
+    std.log.info("deleting '{s}{c}{s}'", .{ config.install_dir, std.fs.path.sep, version_id });
+    try install_dir.deleteTree(version_id);
 }
 fn cleanOutdatedVersions(alloc: Allocator, config: ResolvedZigupConfig) !void {
     // TODO: if deleting symlinked, make sure to clean up the symlink
-    const latest = try latestInstalledVersion(alloc, config.install_dir, .none);
+    const latest = latestInstalledVersion(alloc, config.install_dir, .no_filter)
+        catch |e| switch (e) {
+            error.NoInstalledVersions => null,
+            else => return e,
+        };
     defer if (latest) |l| alloc.free(l);
 
-    const latest_stable = try latestInstalledVersion(alloc, config.install_dir, .stable);
+    const latest_stable = latestInstalledVersion(alloc, config.install_dir, .stable)
+        catch |e| switch (e) {
+            error.NoInstalledVersions => null,
+            else => return e,
+        };
     defer if (latest_stable) |l| alloc.free(l);
 
     var install_dir = std.fs.cwd().openDir(config.install_dir, .{ .iterate = true }) catch |e| switch (e) {
@@ -1004,23 +1200,24 @@ fn printDefaultVersion(alloc: Allocator, config: ResolvedZigupConfig) !void {
     }
 }
 
-fn setDefaultVersion(alloc: Allocator, config: ResolvedZigupConfig, version: ResolvedVersion) !void {
+fn setDefaultVersion(alloc: Allocator, config: ResolvedZigupConfig, version: *LazyVersion) !void {
+    const version_id = try version.resolveId(config);
 
     const source_zig = try std.fs.path.join(alloc, &.{
-        config.install_dir, version.string, "files", comptime "zig" ++ builtin.target.exeFileExt()
+        config.install_dir, version_id, "files", comptime "zig" ++ builtin.target.exeFileExt()
     });
     defer alloc.free(source_zig);
 
     std.fs.cwd().access(source_zig, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            std.log.err("compiler '{s}' is not installed", .{ version.string });
+            std.log.err("compiler '{s}' is not installed", .{ version_id });
             std.process.exit(1);
         },
         else => |e| return e,
     };
 
 //     const source_zls = try std.fs.path.join(alloc, &.{
-//         config.install_dir, version.string, "zls" ++ builtin.target.exeFileExt()
+//         config.install_dir, version_id, "zls" ++ builtin.target.exeFileExt()
 //     });
 //     defer alloc.free(source_zls);
 
@@ -1163,4 +1360,12 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
 
     // finish installation by renaming the install dir
     try std.fs.cwd().rename(installing_dir, compiler_dir);
+}
+fn installZls(alloc: Allocator, config: ResolvedZigupConfig, version: *LazyVersion) !void {
+//     const version_id = version.resolveDate(config) catch |e| switch (e) {
+//
+//     };
+    _ = alloc;
+    _ = config;
+    _ = version;
 }
