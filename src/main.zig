@@ -3,7 +3,9 @@ const builtin = @import("builtin");
 
 const known_folders = @import("known-folders");
 
-// const git2 = @import("git2");
+// HACK: keep this for ZLS completion, otherwise use the other definition
+// const git2 = @cImport({ @cInclude("git2.h"); });
+const git2 = @import("git2");
 
 const Allocator = std.mem.Allocator;
 const cli = @import("cli.zig");
@@ -18,10 +20,10 @@ pub const std_options: std.Options = .{
 };
 
 
-fn getDefaultInstallDir(allocator: Allocator) ![]const u8 {
-    const data_dir = (try known_folders.getPath(allocator, .data)) orelse return error.NoDataDirectory;
-    defer allocator.free(data_dir);
-    const install_dir = try std.fs.path.join(allocator, &[_][]const u8{ data_dir, "zigup" });
+fn getDefaultInstallDir(alloc: Allocator) ![]const u8 {
+    const data_dir = (try known_folders.getPath(alloc, .data)) orelse return error.NoDataDirectory;
+    defer alloc.free(data_dir);
+    const install_dir = try std.fs.path.join(alloc, &[_][]const u8{ data_dir, "zigup" });
 
 
     std.log.debug("default install directory: '{s}'", .{install_dir});
@@ -166,6 +168,16 @@ pub fn runCompiler(alloc: Allocator, config: Config.Resolved, version: *LazyVers
 
 const SetDefault = enum { set_default, leave_default };
 
+fn promptZlsVersion(alloc: Allocator) ![]const u8 {
+    try std.io.getStdOut().writeAll("Unable to find a Zls version to install\nEnter a version (master, commit hash or YYYY-MM-DD): ");
+
+    const stdin = std.io.getStdIn();
+    var version = std.ArrayList(u8).init(alloc);
+    try stdin.reader().streamUntilDelimiter(version.writer(), '\n', 256);
+
+    return version.toOwnedSlice();
+}
+
 fn fetchVersion(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, set_default: SetDefault) !void {
     // TODO: detect interuptions
     const version_id = try version.resolveId(config);
@@ -175,8 +187,7 @@ fn fetchVersion(alloc: Allocator, config: Config.Resolved, version: *LazyVersion
     defer alloc.free(compiler_dir);
     try installCompiler(alloc, compiler_dir, url);
 
-    // TODO: install ZLS
-    try installZls(alloc, config, version);
+    try installZls(alloc, config, version, compiler_dir);
 
     if (set_default == .set_default) {
         try setDefaultVersion(alloc, config, version);
@@ -410,8 +421,8 @@ fn createExeLink(link_target: []const u8, path_link: []const u8) !void {
     try file.writer().writeAll(win32exelink.content[win32exelink.exe_offset + link_target.len ..]);
 }
 
-fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const u8) !void {
-    if (std.fs.cwd().access(compiler_dir, .{})) |_| {
+fn installCompiler(alloc: Allocator, compiler_dir: []const u8, url: []const u8) !void {
+    if (std.fs.cwd().access(compiler_dir, .{})) {
         std.log.info("compiler '{s}' already installed", .{compiler_dir});
         return;
     } else |e| {
@@ -420,8 +431,8 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
         }
     }
 
-    const installing_dir = try std.mem.concat(allocator, u8, &.{ compiler_dir, ".installing" });
-    defer allocator.free(installing_dir);
+    const installing_dir = try std.mem.concat(alloc, u8, &.{ compiler_dir, ".installing" });
+    defer alloc.free(installing_dir);
     try std.fs.cwd().deleteTree(installing_dir);
     try std.fs.cwd().makePath(installing_dir);
 
@@ -430,13 +441,13 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
 
     // download and extract archive
     {
-        const archive = try std.fs.path.join(allocator, &.{ installing_dir, archive_basename });
-        defer allocator.free(archive);
+        const archive = try std.fs.path.join(alloc, &.{ installing_dir, archive_basename });
+        defer alloc.free(archive);
         std.log.info("downloading '{s}' to '{s}'", .{ url, archive });
 
         {
             const file = try std.fs.cwd().createFile(archive, .{});
-            const possible_error = download.download(allocator, url, file.writer());
+            const possible_error = download.download(alloc, url, file.writer());
             // NOTE: close the file before handling errors
             //       as it will delete the parent directory of this file
             file.close();
@@ -459,7 +470,7 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
             var dir = try std.fs.cwd().openDir(installing_dir, .{});
             defer dir.close();
 
-            var tar = try std.compress.xz.decompress(allocator, file.reader());
+            var tar = try std.compress.xz.decompress(alloc, file.reader());
             try std.tar.pipeToFileSystem(dir, tar.reader(), .{});
         } else {
             var recognized = false;
@@ -490,20 +501,245 @@ fn installCompiler(allocator: Allocator, compiler_dir: []const u8, url: []const 
         try std.fs.cwd().deleteTree(archive);
     }
 
-    const extracted_dir = try std.fs.path.join(allocator, &[_][]const u8{ installing_dir, archive_root_dir });
-    defer allocator.free(extracted_dir);
-    const normalized_dir = try std.fs.path.join(allocator, &[_][]const u8{ installing_dir, "files" });
-    defer allocator.free(normalized_dir);
+    const extracted_dir = try std.fs.path.join(alloc, &.{ installing_dir, archive_root_dir });
+    defer alloc.free(extracted_dir);
+    const normalized_dir = try std.fs.path.join(alloc, &.{ installing_dir, "files" });
+    defer alloc.free(normalized_dir);
     try std.fs.cwd().rename(extracted_dir, normalized_dir);
 
     // finish installation by renaming the install dir
     try std.fs.cwd().rename(installing_dir, compiler_dir);
 }
-fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion) !void {
-//     const version_id = version.resolveDate(config) catch |e| switch (e) {
-//
-//     };
-    _ = alloc;
-    _ = config;
+
+fn checkErr(git2_code: c_int) !void {
+    if (git2_code < 0) {
+        const err: ?*const git2.git_error = git2.git_error_last();
+        if (err) |e| {
+            std.log.warn("git2 returned an error ({}): {s} (class {})", .{ git2_code, e.message, e.klass });
+        }
+        return error.Git2Failed;
+    }
+}
+fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, compiler_dir: []const u8) !void {
+    const bin_path = try std.mem.concat(alloc, u8, &.{ compiler_dir, "zls" });
+    defer alloc.free(bin_path);
+
+    if (std.fs.cwd().access(bin_path, .{})) {
+        std.log.info("zls '{s}' already installed", .{compiler_dir});
+        return;
+    } else |e| {
+        if (e != error.FileNotFound) {
+            return e;
+        }
+    }
+
+
+    // TODO: find which Zls commit to checkout
+    // Use release tags if possible, possibly ask user if the master branch should be used
     _ = version;
+//     const resolved_date = version.resolveDate(config) catch |e| switch (e) {
+//         error.NoDate => null,
+//         else => return e,
+//     };
+//     const version_id = try version.resolveId(config);
+//     const commit = blk: {
+//         if (resolved_date) |r| {
+//             break :blk try alloc.dupe(u8, r);
+//         }
+//     };
+//     const commit = if (resolved_date) |r| try alloc.dupe(u8, r) else try promptZlsVersion(alloc);
+//     defer alloc.free(commit);
+
+
+    const zls_repo_path = try std.fs.path.joinZ(alloc, &.{ config.install_dir, "zls-repo" });
+    defer alloc.free(zls_repo_path);
+
+    try checkErr(git2.git_libgit2_init());
+
+    if (std.fs.cwd().accessZ(zls_repo_path, .{})) {
+        std.log.info("using already downloaded zls repository", .{});
+    } else |_| {
+        try fetchZlsRepo(alloc, zls_repo_path);
+    }
+//     try checkoutZls(commit);
+
+    try checkErr(git2.git_libgit2_shutdown());
+
+}
+fn fetchZlsRepo(alloc: Allocator, dir: [:0]const u8) !void {
+    // TODO: consider replacing git2's allocator with this allocator
+    _ = alloc;
+    std.log.info("cloning zls into {s}", .{ dir });
+
+    var clone_opts: git2.git_clone_options = undefined;
+    checkErr(git2.git_clone_options_init(&clone_opts, git2.GIT_CLONE_OPTIONS_VERSION))
+        catch return error.FailedClone;
+
+    var checkout_opts: git2.git_checkout_options = undefined;
+    checkErr(git2.git_checkout_options_init(&checkout_opts, git2.GIT_CHECKOUT_OPTIONS_VERSION))
+        catch return error.FailedClone;
+
+    var progress_tracking: ProgressTracking = .{};
+
+    checkout_opts.checkout_strategy = git2.GIT_CHECKOUT_SAFE;
+	checkout_opts.progress_cb = &checkoutCommitProgress;
+    checkout_opts.progress_payload = &progress_tracking;
+
+    clone_opts.checkout_opts = checkout_opts;
+	clone_opts.fetch_opts.callbacks.transfer_progress = &fetchZlsProgress;
+	clone_opts.fetch_opts.callbacks.sideband_progress = &sidebandProgress;
+    clone_opts.fetch_opts.callbacks.certificate_check = &cert_check;
+    clone_opts.fetch_opts.callbacks.payload = &progress_tracking;
+
+
+    var repo: *git2.git_repository = undefined;
+    checkErr(git2.git_clone(@ptrCast(&repo), "https://github.com/zigtools/zls.git", dir.ptr, &clone_opts))
+        catch return error.FailedClone;
+    defer git2.git_repository_free(repo);
+
+    std.io.getStdOut().writeAll("\n") catch {};
+}
+fn isIso8601Date(date: []const u8) bool {
+    return date.len == "YYYY-MM-DD".len
+        and std.ascii.isDigit(date[0])
+        and std.ascii.isDigit(date[1])
+        and std.ascii.isDigit(date[2])
+        and std.ascii.isDigit(date[3])
+        and date[4] == '-'
+        and std.ascii.isDigit(date[5])
+        and std.ascii.isDigit(date[6])
+        and date[7] == '-'
+        and std.ascii.isDigit(date[8])
+        and std.ascii.isDigit(date[9]);
+}
+fn checkoutZls(commit: []const u8) !void {
+    std.log.err("Zls checkout/build not implemented");
+    // commit is either a commit hash, tag, or ISO 8601 date (YYYY-MM-DD)
+    if (std.SemanticVersion.parse(commit)) |_| {
+        // commit tag
+    } else |_| {}
+
+    if (isIso8601Date(commit)) {
+        // commit date
+    }
+
+    // potentially a commit hash (or invalid)
+
+}
+
+
+/// return git2.GIT_PASSTHROUGH to use the existing validity determination
+// return -1 to fail, 0 to proceed
+export fn cert_check(cert: ?*git2.git_cert, valid: c_int, host_raw: ?[*:0]const u8, payload: ?*anyopaque) c_int {
+    _ = cert;
+    _ = payload;
+
+    const host = std.mem.span(host_raw.?);
+    if (valid != 0) {
+        std.log.info("Certificate for {s} was valid ({}), continuing...", .{ host, valid });
+        return git2.GIT_PASSTHROUGH;
+    } else {
+        std.log.info("Certificate for {s} was invalid ({})", .{ host, valid });
+
+        const continue_conn = block: while (true) {
+            std.io.getStdOut().writer().print("Continue connection? (y/n): ", .{ }) catch {};
+            const stdin = std.io.getStdIn().reader();
+
+            var in: [16]u8 = [_]u8{ 0 } ** 16;
+            var stream = std.io.fixedBufferStream(&in);
+            stdin.streamUntilDelimiter(stream.writer(), '\n', in.len) catch |e| switch (e) {
+                error.StreamTooLong => {
+                    std.log.warn("Invalid input", .{});
+                    stdin.skipUntilDelimiterOrEof('\n') catch continue;
+                    continue;
+                },
+                else => continue,
+            };
+            if (in[1] != 0) {
+                std.log.warn("Invalid input", .{});
+                continue;
+            }
+            if (in[0] == 'y' or in[0] == 'Y') {
+                break :block true;
+            } else if (in[0] == 'n' or in[0] == 'N') {
+                break :block false;
+            } else {
+                std.log.warn("Invalid input", .{});
+            }
+        };
+        if (continue_conn) {
+            return 0;
+        } else {
+            return -1;
+        }
+    }
+}
+
+// Ported from libgit2 examples which were originally licensed under CC0
+const ProgressTracking = struct {
+    stats: git2.git_indexer_progress = .{},
+    completed_steps: usize = 0,
+    total_steps: usize = 0,
+    path: ?[*:0]const u8 = null,
+};
+export fn sidebandProgress(str_raw: ?[*]const u8, len: c_int, payload: ?*anyopaque) c_int {
+    _ = payload;
+
+    const str = str_raw.?[0..@intCast(len)];
+    std.io.getStdOut().writer().print("remote: {s}", .{ str }) catch {};
+    return 0;
+}
+export fn fetchZlsProgress(stats: ?*const git2.git_indexer_progress, payload: ?*anyopaque) c_int {
+    var tracking: *ProgressTracking = @ptrCast(@alignCast(payload.?));
+    tracking.stats = stats.?.*;
+    printFetchAndCheckoutProgress(tracking);
+    return 0;
+}
+export fn checkoutCommitProgress(path: ?[*:0]const u8, current: usize, total: usize, payload: ?*anyopaque) void {
+    var tracking: *ProgressTracking = @ptrCast(@alignCast(payload.?));
+    tracking.completed_steps = current;
+    tracking.total_steps = total;
+    tracking.path = path;
+    printFetchAndCheckoutProgress(tracking);
+}
+fn printFetchAndCheckoutProgress(tracking: *const ProgressTracking) void {
+//     const net_percent = (
+//         if (tracking.stats.total_objects > 0)
+//             100 * tracking.stats.received_objects / tracking.stats.total_objects
+//         else
+//             0
+//     );
+//     const index_percent = (
+//         if (tracking.stats.total_objects > 0)
+//             100 * tracking.stats.indexed_objects / tracking.stats.total_objects
+//         else
+//             0
+//     );
+//     const checkout_percent = (
+//         if (tracking.total_steps > 0)
+//             100 * tracking.completed_steps / tracking.total_steps
+//         else
+//             0
+//     );
+//     const kilobytes = tracking.stats.received_bytes / 1000;
+
+    const writer = std.io.getStdOut().writer();
+    if (
+        tracking.stats.total_objects > 0
+        and tracking.stats.received_objects == tracking.stats.total_objects
+    ) {
+        writer.print("Resolving deltas {}/{}\r", .{
+            tracking.stats.indexed_deltas,
+            tracking.stats.total_deltas,
+        }) catch {};
+    } else {
+//         writer.print("net {: >3}% ({: >4} kb, {: >5}/{: >5})  /  idx {: >3}% ({: >5}/{: >5})  /  chk {: >3}% ({: >4}/{: >4}){s}\n", .{
+//             net_percent, kilobytes,
+//             tracking.stats.received_objects, tracking.stats.total_objects,
+//             index_percent, tracking.stats.indexed_objects, tracking.stats.total_objects,
+//             checkout_percent,
+//             tracking.completed_steps, tracking.total_steps,
+//             std.mem.span(tracking.path),
+//         }) catch {};
+    }
 }

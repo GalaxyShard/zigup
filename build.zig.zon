@@ -6,6 +6,11 @@
             .url = "git+https://github.com/ziglibs/known-folders.git#1cceeb70e77dec941a4178160ff6c8d05a74de6f",
             .hash = "12205f5e7505c96573f6fc5144592ec38942fb0a326d692f9cddc0c7dd38f9028f29",
         },
+        .git2 = .{
+            //.path = "../zig-git2",
+            .url = "git+https://codeberg.org/galaxyshard/zig-git2.git#50ec9eba57d14609272ad198043e8eb6f3c5e10c",
+            .hash = "12208a99ac90e08be4528ce1c9ff66d36947aaff042256a5df14e0f001e16574af02",
+        }
     },
     .paths = .{
         "build.zig",

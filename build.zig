@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const zigup_exe_native = addZigupExe(b, target, optimize);
+    const zigup_exe_native = addZigupExe(b, target, optimize, false);
     b.installArtifact(zigup_exe_native.main);
 
     const run_step = b.step("run", "Run the app");
@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    const test_step = b.step("test", "test the executable");
+    const test_step = b.step("test", "Test the executable");
     const run_tests = b.addRunArtifact(zigup_exe_native.tests);
     test_step.dependOn(&run_tests.step);
 
@@ -26,6 +26,10 @@ pub fn build(b: *std.Build) !void {
     ci_step.dependOn(b.getInstallStep());
     ci_step.dependOn(test_step);
     try ci(b, ci_step);
+
+    const zigup_dry = addZigupExe(b, target, optimize, true);
+    const check_step = b.step("check", "Check for errors");
+    check_step.dependOn(&zigup_dry.main.step);
 }
 
 const ZigupExe = struct {
@@ -36,16 +40,36 @@ fn addZigupExe(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    dry_run: bool,
 ) ZigupExe {
 
     const known_folders = b.dependency("known-folders", .{}).module("known-folders");
-    const exe = b.addExecutable(.{
+
+    const git2 = b.dependency("git2", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const header = b.addTranslateC(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = git2.artifact("git2").getEmittedIncludeTree().path(git2.builder, "git2.h"),
+    });
+    const header_module = header.createModule();
+
+    const zigup = b.addExecutable(.{
         .name = "zigup",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
-    exe.root_module.addImport("known-folders", known_folders);
+    zigup.root_module.addImport("known-folders", known_folders);
+    zigup.root_module.addImport("git2", header_module);
+    if (!dry_run) {
+        zigup.linkLibrary(git2.artifact("git2"));
+    }
+
 
     if (target.result.os.tag == .windows) {
         const win32exelink = b.addExecutable(.{
@@ -57,7 +81,7 @@ fn addZigupExe(
         const module = b.createModule(.{
             .root_source_file = win32exelink.getEmittedBin(),
         });
-        exe.root_module.addImport("win32exelink", module);
+        zigup.root_module.addImport("win32exelink", module);
     }
     const tests = b.addTest(.{
         .name = "zigup-test",
@@ -67,7 +91,7 @@ fn addZigupExe(
     });
 
     return .{
-        .main = exe,
+        .main = zigup,
         .tests = tests,
     };
 }
@@ -106,7 +130,7 @@ fn ci(
             .{ .arch_os_abi = ci_target_str },
         ));
 
-        const zigup_exe = addZigupExe(b, target, .ReleaseSafe);
+        const zigup_exe = addZigupExe(b, target, .ReleaseSafe, false);
         const zigup_exe_install = b.addInstallArtifact(zigup_exe.main, .{
             .dest_dir = .{ .override = .{ .custom = ci_target_str } },
         });
