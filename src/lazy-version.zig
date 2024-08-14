@@ -28,12 +28,12 @@ const host_os = switch (builtin.os.tag) {
 const json_platform = host_cpu_arch ++ "-" ++ host_os;
 
 alloc: Allocator,
-raw: []const u8,
+raw: []u8,
 
 index: version_index.Indexes = .{ .mach = null, .zig = null },
-id: ?[]const u8 = null,
-url: ?[]const u8 = null,
-date: ?[]const u8 = null,
+id: ?[]u8 = null,
+url: ?[]u8 = null,
+date: ?[]u8 = null,
 
 resolve_error: ?ResolveError = null,
 
@@ -82,7 +82,7 @@ pub fn resolveAll(self: *LazyVersion, config: Config.Resolved) ResolveError!void
         return e;
     }
 }
-fn urlFromId(alloc: Allocator, id: []const u8) ![]const u8 {
+fn urlFromId(alloc: Allocator, id: []const u8) ![]u8 {
     const version = id["zig-".len..];
     return std.mem.concat(alloc, u8, &.{
         "https://ziglang.org/builds/zig-" ++ host_os ++ "-" ++ host_cpu_arch ++ "-",

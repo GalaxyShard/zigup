@@ -21,7 +21,7 @@ pub const std_options: std.Options = .{
 };
 
 
-fn getDefaultInstallDir(alloc: Allocator) ![]const u8 {
+fn getDefaultInstallDir(alloc: Allocator) ![]u8 {
     const data_dir = (try known_folders.getPath(alloc, .data)) orelse return error.NoDataDirectory;
     defer alloc.free(data_dir);
     const install_dir = try std.fs.path.join(alloc, &[_][]const u8{ data_dir, "zigup" });
@@ -169,7 +169,7 @@ pub fn runCompiler(alloc: Allocator, config: Config.Resolved, version: *LazyVers
 
 const SetDefault = enum { set_default, leave_default };
 
-fn promptZlsVersion(alloc: Allocator) ![]const u8 {
+fn promptZlsVersion(alloc: Allocator) ![]u8 {
     try std.io.getStdOut().writeAll("Unable to find a Zls version to install\nEnter a version (master, commit hash or YYYY-MM-DD): ");
 
     const stdin = std.io.getStdIn();
@@ -306,7 +306,7 @@ fn installPathToVersion(target_path: []const u8) []const u8 {
     return std.fs.path.basename(std.fs.path.dirname(std.fs.path.dirname(target_path) orelse return "") orelse return "");
 }
 
-fn getDefaultVersion(alloc: Allocator, config: Config.Resolved) !?[]const u8 {
+fn getDefaultVersion(alloc: Allocator, config: Config.Resolved) !?[]u8 {
     var buffer: [std.fs.max_path_bytes]u8 = .{ undefined } ** std.fs.max_path_bytes;
 
     if (builtin.os.tag == .windows) {
