@@ -472,31 +472,21 @@ fn installCompiler(alloc: Allocator, compiler_dir: []const u8, url: []const u8) 
 
             var tar = try std.compress.xz.decompress(alloc, file.reader());
             try std.tar.pipeToFileSystem(dir, tar.reader(), .{});
+
+        } else if (std.mem.endsWith(u8, archive_basename, ".zip")) {
+            std.log.info("extracting {s} into {s}", .{ archive, installing_dir });
+            archive_root_dir = archive_basename[0 .. archive_basename.len - ".zip".len];
+
+            var file = try std.fs.cwd().openFile(archive, .{});
+            defer file.close();
+
+            var dir = try std.fs.cwd().openDir(installing_dir, .{});
+            defer dir.close();
+
+            try std.zip.extract(dir, file.seekableStream(), .{});
         } else {
-            var recognized = false;
-            if (builtin.os.tag == .windows) {
-                if (std.mem.endsWith(u8, archive_basename, ".zip")) {
-                    std.log.info("extracting {s} into {s}", .{ archive, installing_dir });
-                    recognized = true;
-                    archive_root_dir = archive_basename[0 .. archive_basename.len - ".zip".len];
-
-                    var installing_dir_opened = try std.fs.cwd().openDir(installing_dir, .{});
-                    defer installing_dir_opened.close();
-
-
-                    var timer = try std.time.Timer.start();
-                    var archive_file = try std.fs.cwd().openFile(archive, .{});
-                    defer archive_file.close();
-                    try std.zip.extract(installing_dir_opened, archive_file.seekableStream(), .{});
-                    const time = timer.read();
-                    std.log.info("extracted archive in {d:.2} s", .{@as(f32, @floatFromInt(time)) / @as(f32, @floatFromInt(std.time.ns_per_s))});
-                }
-            }
-
-            if (!recognized) {
-                std.log.err("unknown archive extension '{s}'", .{archive_basename});
-                return error.UnknownArchiveExtension;
-            }
+            std.log.err("unknown archive extension '{s}'", .{archive_basename});
+            return error.UnknownArchiveExtension;
         }
         try std.fs.cwd().deleteTree(archive);
     }
