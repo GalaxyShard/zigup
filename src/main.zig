@@ -558,15 +558,20 @@ fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, 
 
     if (std.fs.cwd().accessZ(zls_repo_path, .{})) {
         std.log.info("using already downloaded zls repository", .{});
+
+        const check_updates = promptBool("Fetch Zls commits and updates? (Y/n): ", true);
+        if (check_updates) {
+            try fetchZlsCommits(alloc, zls_repo_path);
+        }
     } else |_| {
-        try fetchZlsRepo(alloc, zls_repo_path);
+        try cloneZlsRepo(alloc, zls_repo_path);
     }
 //     try checkoutZls(commit);
 
     try checkErr(git2.git_libgit2_shutdown());
 
 }
-fn fetchZlsRepo(alloc: Allocator, dir: [:0]const u8) !void {
+fn cloneZlsRepo(alloc: Allocator, dir: [:0]const u8) !void {
     // TODO: consider replacing git2's allocator with this allocator
     _ = alloc;
     std.log.info("cloning zls into {s}", .{ dir });
@@ -599,6 +604,29 @@ fn fetchZlsRepo(alloc: Allocator, dir: [:0]const u8) !void {
 
     std.io.getStdOut().writeAll("\n") catch {};
 }
+fn fetchZlsCommits(alloc: Allocator, dir: [:0]const u8) !void {
+    // TODO: consider replacing git2's allocator with this allocator
+    _ = alloc;
+    std.log.info("fetching latest commits into zls installation {s}", .{ dir });
+
+    var repo: *git2.git_repository = undefined;
+    checkErr(git2.git_repository_open(@ptrCast(&repo), dir.ptr))
+        catch return error.FailedOpen;
+    defer git2.git_repository_free(repo);
+
+    var remote: *git2.git_remote = undefined;
+    checkErr(git2.git_remote_lookup(@ptrCast(&remote), repo, "origin"))
+        catch return error.MissingRemote;
+
+
+    var options: git2.git_fetch_options = undefined;
+    checkErr(git2.git_fetch_options_init(&options, git2.GIT_FETCH_OPTIONS_VERSION))
+        catch return error.FailedFetch;
+
+    options.callbacks.certificate_check = &cert_check;
+    checkErr(git2.git_remote_fetch(remote, null, &options, null))
+        catch return error.FailedFetch;
+}
 fn isIso8601Date(date: []const u8) bool {
     return date.len == "YYYY-MM-DD".len
         and std.ascii.isDigit(date[0])
@@ -628,45 +656,152 @@ fn checkoutZls(commit: []const u8) !void {
 }
 
 
-/// return git2.GIT_PASSTHROUGH to use the existing validity determination
-// return -1 to fail, 0 to proceed
-export fn cert_check(cert: ?*git2.git_cert, valid: c_int, host_raw: ?[*:0]const u8, payload: ?*anyopaque) c_int {
-    _ = cert;
+fn promptBool(comptime message: []const u8, default: ?bool) bool {
+    while (true) {
+        std.io.getStdOut().writer().print(message, .{}) catch {};
+        const stdin = std.io.getStdIn().reader();
+
+        var in: [16]u8 = [_]u8{ 0 } ** 16;
+        var stream = std.io.fixedBufferStream(&in);
+        stdin.streamUntilDelimiter(stream.writer(), '\n', in.len) catch |e| switch (e) {
+            error.StreamTooLong => {
+                std.log.warn("Invalid input", .{});
+                stdin.skipUntilDelimiterOrEof('\n') catch continue;
+                continue;
+            },
+            else => continue,
+        };
+        if (in[1] != 0) {
+            std.log.warn("Invalid input", .{});
+            continue;
+        }
+        if (in[0] == 'y' or in[0] == 'Y') {
+            return true;
+        } else if (in[0] == 'n' or in[0] == 'N') {
+            return false;
+        } else if (default) |d| {
+            return d;
+        } else {
+            std.log.warn("Invalid input", .{});
+        }
+    }
+}
+
+fn printSshKey(writer: anytype, key_type: c_uint, raw: []const u8) !void {
+    // Untested, will not be called anyways unless ssh is used instead of https
+    switch (key_type) {
+        git2.GIT_CERT_SSH_RAW_TYPE_RSA => {
+            try writer.print("rsa: {s}\n", .{ raw });
+        },
+        git2.GIT_CERT_SSH_RAW_TYPE_DSS => {
+            try writer.print("dds: {s}\n", .{ raw });
+        },
+        git2.GIT_CERT_SSH_RAW_TYPE_KEY_ECDSA_256 => {
+            try writer.print("ECDSA 256: {s}\n", .{ raw });
+        },
+        git2.GIT_CERT_SSH_RAW_TYPE_KEY_ECDSA_384 => {
+            try writer.print("ECDSA 384: {s}\n", .{ raw });
+        },
+        git2.GIT_CERT_SSH_RAW_TYPE_KEY_ECDSA_521 => {
+            try writer.print("ECDSA 521: {s}\n", .{ raw });
+        },
+        git2.GIT_CERT_SSH_RAW_TYPE_KEY_ED25519 => {
+            try writer.print("ED25519: {s}\n", .{ raw });
+        },
+        else => return error.InvalidKeyType,
+    }
+}
+fn printCert(writer: anytype, cert: std.crypto.Certificate.Parsed) !void {
+    const format = (
+        \\Version: {s}
+        \\Signature Algorithm: {s}
+        \\Issuer: {s}
+        \\Valid between {} and {}
+        \\Subject: {s}
+        \\Public Key: {s}
+//         \\Public Key Algorithm: {s}
+        \\
+    );
+    const public_key = cert.pubKey();
+
+    try writer.print(format, .{
+        @tagName(cert.version),
+        @tagName(cert.signature_algorithm),
+        cert.issuer(),
+        cert.validity.not_before, cert.validity.not_after,
+        cert.subject(),
+        public_key,
+//         cert.pubKeySigAlgo(),
+    });
+}
+/// return `git2.GIT_PASSTHROUGH` to use the existing validity determination
+/// return -1 to fail, 0 to proceed
+export fn cert_check(cert_generic_raw: ?*git2.git_cert, valid: c_int, host_raw: ?[*:0]const u8, payload: ?*anyopaque) c_int {
     _ = payload;
 
     const host = std.mem.span(host_raw.?);
+    const cert_generic = cert_generic_raw.?;
+
     if (valid != 0) {
-        std.log.info("Certificate for {s} was valid ({}), continuing...", .{ host, valid });
+        std.log.info("Certificate for {s} was valid, continuing...", .{ host });
         return git2.GIT_PASSTHROUGH;
     } else {
-        std.log.info("Certificate for {s} was invalid ({})", .{ host, valid });
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("\nCertificate for {s} was invalid\n\n", .{ host }) catch {};
+        stderr.print("Details: ", .{}) catch {};
 
-        const continue_conn = block: while (true) {
-            std.io.getStdOut().writer().print("Continue connection? (y/n): ", .{ }) catch {};
-            const stdin = std.io.getStdIn().reader();
+        // https://libgit2.org/libgit2/#HEAD/type/git_cert_t
+        switch (cert_generic.cert_type) {
+            git2.GIT_CERT_NONE => {
+                stderr.print("none\n", .{}) catch {};
+            },
+            git2.GIT_CERT_X509 => {
+                const cert: *git2.git_cert_x509 = @alignCast(@ptrCast(cert_generic));
+                const cert_data_raw: [*]const u8 = @ptrCast(cert.data.?);
+                const cert_data = cert_data_raw[0..cert.len];
 
-            var in: [16]u8 = [_]u8{ 0 } ** 16;
-            var stream = std.io.fixedBufferStream(&in);
-            stdin.streamUntilDelimiter(stream.writer(), '\n', in.len) catch |e| switch (e) {
-                error.StreamTooLong => {
-                    std.log.warn("Invalid input", .{});
-                    stdin.skipUntilDelimiterOrEof('\n') catch continue;
-                    continue;
-                },
-                else => continue,
-            };
-            if (in[1] != 0) {
-                std.log.warn("Invalid input", .{});
-                continue;
-            }
-            if (in[0] == 'y' or in[0] == 'Y') {
-                break :block true;
-            } else if (in[0] == 'n' or in[0] == 'N') {
-                break :block false;
-            } else {
-                std.log.warn("Invalid input", .{});
-            }
-        };
+                const try_parsed_cert = std.crypto.Certificate.parse(.{
+                    .buffer = cert_data,
+                    .index = 0,
+                });
+                if (try_parsed_cert) |parsed_cert| {
+                    stderr.print("x509\n", .{ }) catch {};
+                    printCert(stderr, parsed_cert) catch {};
+                } else |e| {
+                    stderr.print("x509: unable to parse ({s})\n", .{ @errorName(e) }) catch {};
+                }
+            },
+            git2.GIT_CERT_HOSTKEY_LIBSSH2 => {
+                const cert: *git2.git_cert_hostkey = @alignCast(@ptrCast(cert_generic));
+                stderr.print("hostkey cert\n", .{}) catch {};
+
+                if ((cert.type & git2.GIT_CERT_SSH_MD5) != 0) {
+                    stderr.print("md5: {s}\n", .{ cert.hash_md5 }) catch {};
+                }
+                if ((cert.type & git2.GIT_CERT_SSH_SHA1) != 0) {
+                    stderr.print("sha1: {s}\n", .{ cert.hash_sha1 }) catch {};
+                }
+                if ((cert.type & git2.GIT_CERT_SSH_SHA256) != 0) {
+                    stderr.print("sha256: {s}\n", .{ cert.hash_sha256 }) catch {};
+                }
+                if ((cert.type & git2.GIT_CERT_SSH_RAW) != 0) {
+                    printSshKey(stderr, cert.raw_type, cert.hostkey[0..cert.hostkey_len])
+                        catch |e| if (e == error.InvalidKeyType) unreachable;
+                }
+            },
+            git2.GIT_CERT_STRARRAY => {
+                const cert: *git2.git_strarray = @alignCast(@ptrCast(cert_generic));
+                stderr.print("string array\n", .{}) catch {};
+
+                for (cert.strings[0..cert.count]) |string| {
+                    stderr.print("string: {s}\n", .{ string }) catch {};
+                }
+            },
+            else => unreachable,
+
+        }
+
+        const continue_conn = promptBool("Continue connection? (y/n): ", null);
         if (continue_conn) {
             return 0;
         } else {

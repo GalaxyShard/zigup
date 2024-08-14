@@ -45,7 +45,7 @@ pub fn main() !u8 {
     // NOTE: create the process.child before calling SetConsoleCtrlHandler because it uses it
     global.child = std.process.Child.init(args, global.arena);
 
-    if (std.os.windows.SetConsoleCtrlHandler(consoleCtrlHandler, true)) |_| {
+    if (std.os.windows.SetConsoleCtrlHandler(consoleCtrlHandler, true)) {
 
     } else |err| {
         log.err("SetConsoleCtrlHandler failed, error={}", .{err});
