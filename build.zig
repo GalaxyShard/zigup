@@ -5,7 +5,14 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const use_llvm = b.option(bool, "llvm", "Use LLVM/LLD or self-hosted backend");
+
     const zigup_exe_native = addZigupExe(b, target, optimize, false);
+    zigup_exe_native.main.use_llvm = use_llvm;
+    zigup_exe_native.main.use_lld = use_llvm;
+    zigup_exe_native.tests.use_llvm = use_llvm;
+    zigup_exe_native.tests.use_lld = use_llvm;
+
     b.installArtifact(zigup_exe_native.main);
 
     const run_step = b.step("run", "Run the app");
