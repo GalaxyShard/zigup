@@ -99,7 +99,7 @@ pub fn main() !void {
         },
 
         .list => {
-            try listVersions(resolved_config);
+            try listVersions(alloc, resolved_config);
         },
         .fetch_index => {
             var cache_dir: std.fs.Dir = known_folders.open(alloc, .cache, .{})
@@ -187,16 +187,31 @@ fn fetchVersion(alloc: Allocator, config: Config.Resolved, version: *LazyVersion
     }
 }
 
-fn listVersions(config: Config.Resolved) !void {
+fn listVersions(alloc: Allocator, config: Config.Resolved) !void {
     var install_dir = std.fs.cwd().openDir(config.install_dir, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return,
         else => return e,
     };
     defer install_dir.close();
 
-    const stdout = std.io.getStdOut().writer();
-    var it = install_dir.iterate();
 
+    const FoundVersion = struct {
+        string: []u8,
+        is_kept: bool,
+        pub fn deinit(self: @This(), alloc0: Allocator) void {
+            alloc0.free(self.string);
+        }
+        pub fn ascending(_: void, lhs: @This(), rhs: @This()) bool {
+            return std.mem.lessThan(u8, lhs.string, rhs.string);
+        }
+    };
+    var versions = std.ArrayList(FoundVersion).init(alloc);
+    defer {
+        for (versions.items) |v| v.deinit(alloc);
+        versions.deinit();
+    }
+
+    var it = install_dir.iterate();
     while (try it.next()) |entry| {
         if (entry.kind != .directory)
             continue;
@@ -205,18 +220,35 @@ fn listVersions(config: Config.Resolved) !void {
         if (std.mem.endsWith(u8, entry.name, ".installing"))
             continue;
 
-        var version = try install_dir.openDir(entry.name, .{});
-        defer version.close();
+        var version_dir = try install_dir.openDir(entry.name, .{});
+        defer version_dir.close();
 
-        version.access(".keep", .{}) catch |e| switch (e) {
+        version_dir.access(".keep", .{}) catch |e| switch (e) {
             error.FileNotFound => {
-                try stdout.print("{s}\n", .{entry.name});
+                try versions.append(.{
+                    .string = try alloc.dupe(u8, entry.name),
+                    .is_kept = false,
+                });
+//                 try stdout.print("{s}\n", .{entry.name});
                 continue;
             },
             else => |e2| return e2,
         };
-        try stdout.print("{s} (kept)\n", .{entry.name});
+        try versions.append(.{
+            .string = try alloc.dupe(u8, entry.name),
+            .is_kept = true,
+        });
+//         try stdout.print("{s} (kept)\n", .{entry.name});
+    }
+    std.mem.sort(FoundVersion, versions.items, {}, FoundVersion.ascending);
 
+    const stdout = std.io.getStdOut().writer();
+    for (versions.items) |version| {
+        if (version.is_kept) {
+            try stdout.print("{s} (kept)\n", .{ version.string });
+        } else {
+            try stdout.print("{s}\n", .{ version.string });
+        }
     }
 }
 
