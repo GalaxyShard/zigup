@@ -250,7 +250,7 @@ pub fn latestInstalledVersion(
     alloc: Allocator,
     install_dir: []const u8,
     filter: enum { no_filter, stable }
-) FindLatestError ![]const u8 {
+) FindLatestError ![]u8 {
     var directory = std.fs.cwd().openDir(install_dir, .{
         .iterate = true,
     }) catch |e| switch (e) {
@@ -259,7 +259,7 @@ pub fn latestInstalledVersion(
     };
     defer directory.close();
 
-    var latest_found: ?[]const u8 = null;
+    var latest_found: ?[]u8 = null;
 
     var iter = directory.iterate();
     while (iter.next() catch return error.FailedInstallSearch) |entry| {
