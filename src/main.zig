@@ -169,15 +169,6 @@ pub fn runCompiler(alloc: Allocator, config: Config.Resolved, version: *LazyVers
 
 const SetDefault = enum { set_default, leave_default };
 
-fn promptZlsVersion(alloc: Allocator) ![]u8 {
-    try std.io.getStdOut().writeAll("Unable to find a Zls version to install\nEnter a version (master, commit hash or YYYY-MM-DD): ");
-
-    const stdin = std.io.getStdIn();
-    var version = std.ArrayList(u8).init(alloc);
-    try stdin.reader().streamUntilDelimiter(version.writer(), '\n', 256);
-
-    return version.toOwnedSlice();
-}
 
 fn fetchVersion(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, set_default: SetDefault) !void {
     // TODO: detect interuptions
@@ -515,26 +506,9 @@ fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, 
         }
     }
 
-
-    // TODO: find which Zls commit to checkout
-    // Use release tags if possible, possibly ask user if the master branch should be used
-    _ = version;
-//     const resolved_date = version.resolveDate(config) catch |e| switch (e) {
-//         error.NoDate => null,
-//         else => return e,
-//     };
-//     const version_id = try version.resolveId(config);
-//     const commit = blk: {
-//         if (resolved_date) |r| {
-//             break :blk try alloc.dupe(u8, r);
-//         }
-//     };
-//     const commit = if (resolved_date) |r| try alloc.dupe(u8, r) else try promptZlsVersion(alloc);
-//     defer alloc.free(commit);
-
-
     const zls_repo_path = try std.fs.path.joinZ(alloc, &.{ config.install_dir, "zls-repo" });
     defer alloc.free(zls_repo_path);
+
 
     try zls_git.checkErr(git2.git_libgit2_init());
 
@@ -543,13 +517,75 @@ fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, 
 
         const check_updates = zls_git.promptBool("Fetch Zls commits and updates? (Y/n): ", true);
         if (check_updates) {
-            try zls_git.fetchZlsCommits(alloc, zls_repo_path);
+            try zls_git.fetchCommits(alloc, zls_repo_path);
         }
     } else |_| {
-        try zls_git.cloneZlsRepo(alloc, zls_repo_path);
+        try zls_git.cloneRepo(alloc, zls_repo_path);
     }
-//     try zls_git.checkoutZls(commit);
+    const oid = try resolveZlsCommit(alloc, config, version, zls_repo_path);
+    try zls_git.checkout(alloc, zls_repo_path, oid);
+
 
     try zls_git.checkErr(git2.git_libgit2_shutdown());
+}
 
+fn resolveZlsCommit(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, repo_dir: [:0]const u8) !git2.git_oid {
+    const id = try version.resolveId(config);
+    const version_num = id["zig-".len ..];
+
+    const c_version_num = try alloc.dupeZ(u8, version_num);
+    defer alloc.free(c_version_num);
+
+    if (zls_git.findReference(alloc, repo_dir, c_version_num)) |oid| {
+        return oid;
+    } else |_| {
+        std.log.info("reference not found", .{});
+    }
+
+
+    // TODO: instead of defaulting to origin/master,
+    // potentially find the closest commit to the compiler date
+    std.log.info("using zls origin/master", .{});
+    if (zls_git.findReference(alloc, repo_dir, "origin/master")) |oid| {
+        return oid;
+    } else |_| {
+        std.log.info("origin/master reference not found", .{});
+    }
+    var zls_version = std.ArrayList(u8).init(alloc);
+    while (true) {
+        zls_version.clearRetainingCapacity();
+
+        try std.io.getStdOut().writeAll("Unable to find a Zls version to install\nEnter a version (SHA1 hash or master): ");
+
+        const stdin = std.io.getStdIn();
+        stdin.reader().streamUntilDelimiter(zls_version.writer(), '\n', 256) catch |e| {
+            if (e == error.StreamTooLong) {
+                try stdin.reader().skipUntilDelimiterOrEof('\n');
+                continue;
+            } else {
+                return error.UnableToResolve;
+            }
+        };
+
+        if (std.mem.eql(u8, zls_version.items, "master")) {
+            if (zls_git.findReference(alloc, repo_dir, "origin/master")) |oid| {
+                return oid;
+            } else |_| {
+                std.log.err("origin/master not found", .{});
+            }
+        }
+
+        try zls_version.append(0);
+        const c_string = zls_version.items[0..zls_version.items.len-1 :0];
+
+        if (zls_git.findCommit(alloc, repo_dir, c_string)) |oid| {
+            return oid;
+        } else |_| {
+            std.log.info("commit not found", .{});
+        }
+    }
+//     const resolved_date = version.resolveDate(config) catch |e| switch (e) {
+//         error.NoDate => null,
+//         else => return e,
+//     };
 }

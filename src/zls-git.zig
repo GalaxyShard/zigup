@@ -11,7 +11,7 @@ pub fn checkErr(git2_code: c_int) !void {
     if (git2_code < 0) {
         const err: ?*const git2.git_error = git2.git_error_last();
         if (err) |e| {
-            std.log.warn("git2 returned an error ({}): {s} (class {})", .{ git2_code, e.message, e.klass });
+            std.log.debug("git2 returned an error ({}): {s} (class {})", .{ git2_code, e.message, e.klass });
         }
         return error.Git2Failed;
     }
@@ -39,11 +39,12 @@ pub fn promptBool(comptime message: []const u8, default: ?bool) bool {
             return true;
         } else if (in[0] == 'n' or in[0] == 'N') {
             return false;
-        } else if (default) |d| {
-            return d;
-        } else {
-            std.log.warn("Invalid input", .{});
+        } else if (in[0] == 0) {
+            if (default) |d| {
+                return d;
+            }
         }
+        std.log.warn("Invalid input", .{});
     }
 }
 
@@ -110,7 +111,7 @@ fn isIso8601Date(date: []const u8) bool {
 
 
 
-pub fn cloneZlsRepo(alloc: Allocator, dir: [:0]const u8) !void {
+pub fn cloneRepo(alloc: Allocator, dir: [:0]const u8) !void {
     // TODO: consider replacing git2's allocator with this allocator
     _ = alloc;
     std.log.info("cloning zls into {s}", .{ dir });
@@ -143,7 +144,7 @@ pub fn cloneZlsRepo(alloc: Allocator, dir: [:0]const u8) !void {
 
     std.io.getStdOut().writeAll("\n") catch {};
 }
-pub fn fetchZlsCommits(alloc: Allocator, dir: [:0]const u8) !void {
+pub fn fetchCommits(alloc: Allocator, dir: [:0]const u8) !void {
     // TODO: consider replacing git2's allocator with this allocator
     _ = alloc;
     std.log.info("fetching latest commits into zls installation {s}", .{ dir });
@@ -156,6 +157,7 @@ pub fn fetchZlsCommits(alloc: Allocator, dir: [:0]const u8) !void {
     var remote: *git2.git_remote = undefined;
     checkErr(git2.git_remote_lookup(@ptrCast(&remote), repo, "origin"))
         catch return error.MissingRemote;
+    defer git2.git_remote_free(remote);
 
 
     var options: git2.git_fetch_options = undefined;
@@ -167,21 +169,89 @@ pub fn fetchZlsCommits(alloc: Allocator, dir: [:0]const u8) !void {
         catch return error.FailedFetch;
 }
 
-pub fn checkoutZls(commit: []const u8) !void {
-    std.log.err("Zls checkout/build not implemented");
-    // commit is either a commit hash, tag, or ISO 8601 date (YYYY-MM-DD)
-    if (std.SemanticVersion.parse(commit)) |_| {
-        // commit tag
-    } else |_| {}
+pub fn checkout(alloc: Allocator, dir: [:0]const u8, oid: git2.git_oid) !void {
+    // TODO: consider replacing git2's allocator with this allocator
+    _ = alloc;
+    std.log.info("checking out zls commit {}", .{ std.fmt.fmtSliceHexLower(&oid.id) });
 
-    if (isIso8601Date(commit)) {
-        // commit date
-    }
+    var repo: *git2.git_repository = undefined;
+    checkErr(git2.git_repository_open(@ptrCast(&repo), dir.ptr))
+        catch return error.FailedOpen;
+    defer git2.git_repository_free(repo);
 
-    // potentially a commit hash (or invalid)
 
+    var checkout_opts: git2.git_checkout_options = undefined;
+    checkErr(git2.git_checkout_options_init(&checkout_opts, git2.GIT_CHECKOUT_OPTIONS_VERSION))
+        catch return error.FailedClone;
+
+    var progress_tracking: ProgressTracking = .{};
+
+    checkout_opts.checkout_strategy = git2.GIT_CHECKOUT_SAFE;
+	checkout_opts.progress_cb = &checkoutCommitProgress;
+    checkout_opts.progress_payload = &progress_tracking;
+
+    var commit: *git2.git_commit = undefined;
+    checkErr(git2.git_commit_lookup(@ptrCast(&commit), repo, &oid))
+        catch return error.FailedCommitLookup;
+    defer git2.git_commit_free(commit);
+
+    // although `commit` isn't a tree, it will be peeled into a tree according to libgit2 documentation
+    checkErr(git2.git_checkout_tree(repo, @ptrCast(commit), &checkout_opts))
+        catch return error.FailedCheckoutTree;
+
+    checkErr(git2.git_repository_set_head_detached(repo, &oid))
+        catch return error.FailedDetachHead;
 }
 
+
+
+pub fn findReference(alloc: Allocator, dir: [:0]const u8, short_name: [:0]const u8) !git2.git_oid {
+    // TODO: consider replacing git2's allocator with this allocator
+    _ = alloc;
+    std.log.info("searching for reference {s} in {s}", .{ short_name, dir });
+
+    var repo: *git2.git_repository = undefined;
+    checkErr(git2.git_repository_open(@ptrCast(&repo), dir.ptr))
+        catch return error.FailedOpen;
+    defer git2.git_repository_free(repo);
+
+
+    var ref: *git2.git_reference = undefined;
+    if (checkErr(git2.git_reference_dwim(@ptrCast(&ref), repo, short_name))) {
+        defer git2.git_reference_free(ref);
+
+        const ref_name = git2.git_reference_name(ref);
+
+        var oid: git2.git_oid = undefined;
+        checkErr(git2.git_reference_name_to_id(&oid, repo, ref_name))
+            catch return error.ReferenceNotFound;
+
+        return oid;
+    } else |_| {
+        return error.ReferenceNotFound;
+    }
+}
+pub fn findCommit(alloc: Allocator, dir: [:0]const u8, sha: [:0]const u8) !git2.git_oid {
+    // TODO: consider replacing git2's allocator with this allocator
+    _ = alloc;
+    std.log.info("searching for commit {s} in {s}", .{ sha, dir });
+
+    var repo: *git2.git_repository = undefined;
+    checkErr(git2.git_repository_open(@ptrCast(&repo), dir.ptr))
+        catch return error.FailedOpen;
+    defer git2.git_repository_free(repo);
+
+
+    var obj: *git2.git_object = undefined;
+    if (checkErr(git2.git_revparse_single(@ptrCast(&obj), repo, sha))) {
+        defer git2.git_object_free(obj);
+
+        const oid = git2.git_object_id(obj).*;
+        return oid;
+    } else |_| {
+        return error.ReferenceNotFound;
+    }
+}
 
 
 /// return `git2.GIT_PASSTHROUGH` to use the existing validity determination
