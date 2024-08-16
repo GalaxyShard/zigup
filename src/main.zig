@@ -567,8 +567,8 @@ fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, 
 
     try zls_git.checkErr(git2.git_libgit2_shutdown());
 
-
-    if (0 != try runCompiler(alloc, config, version, zls_repo_path, &.{"build"})) {
+    // TODO: make release mode configurable
+    if (0 != try runCompiler(alloc, config, version, zls_repo_path, &.{"build", "--release=safe"})) {
         return error.FailedCompile;
     }
 
