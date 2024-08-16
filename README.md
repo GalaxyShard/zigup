@@ -2,7 +2,7 @@
 
 Download and manage zig compilers and ZLS versions.
 
-Built-in support for Mach releases and ZLS (TODO: not implemented)
+Built-in support for Mach releases and ZLS
 
 # Building
 
@@ -18,7 +18,7 @@ zig build -Doptimize=ReleaseSafe
 
 # Usage
 
-```
+```sh
 # fetch a compiler and set it as the default
 zigup <version>
 zigup 0.13.0
@@ -42,6 +42,9 @@ zigup list
 # Removes this compiler
 zigup clean <version>
 
+# Removes all compilers except latest-installed, latest installed stable, and any kept compilers
+zigup clean outdated
+
 # mark a compiler to keep
 zigup keep <version>
 
@@ -56,11 +59,11 @@ Zigup stores each compiler and language server in a subdirectory of the installa
 Zigup can optionally symlink a "default" Zig/ZLS. On windows this will create an executable that forwards invocations to one of the `zig`/`zls` executables in the install directory.
 
 Options can be configured via the following command line options:
-```
+```sh
 # Single-run
---install-dir <DIR>
---zig-symlink <FILE_PATH>
---zls-symlink <FILE_PATH>
+zigup <command> --install-dir <DIR>
+zigup <command> --zig-symlink <FILE_PATH>
+zigup <command> --zls-symlink <FILE_PATH>
 
 # Persist settings (saves in the default configuration directory from known-folders)
 zigup set-install-dir <DIR>

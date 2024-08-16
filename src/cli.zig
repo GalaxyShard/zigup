@@ -91,7 +91,7 @@ fn print_help() !void {
         \\                                Defaults to install-dir/zig
         \\
         \\  --zls-symlink <FILE_PATH>     Path where the `zls` symlink will be placed, pointing to the default language server
-        \\                                This will typically be a file path within a PATH directory so that the user can just run `zig`
+        \\                                This will typically be a file path within a PATH directory so that the user can just run `zls`
         \\                                Defaults to install-dir/zls
         \\
         \\  -h, --help                    Display this help text
