@@ -95,7 +95,7 @@ pub fn main() !void {
             var version = try LazyVersion.init(alloc, args.version);
             defer version.deinit();
 
-            _ = try runCompiler(alloc, resolved_config, &version, args.zig_args);
+            _ = try runCompiler(alloc, resolved_config, &version, null, args.zig_args);
         },
 
         .list => {
@@ -136,7 +136,7 @@ pub fn main() !void {
 }
 
 
-pub fn runCompiler(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, args: []const []const u8) !u8 {
+pub fn runCompiler(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, override_cwd: ?[]const u8, args: []const []const u8) !u8 {
     const id = try version.resolveId(config);
     const compiler_path = try std.fs.path.join(alloc, &[_][]const u8{ config.install_dir, id });
     defer alloc.free(compiler_path);
@@ -155,14 +155,15 @@ pub fn runCompiler(alloc: Allocator, config: Config.Resolved, version: *LazyVers
     try argv.append(try std.fs.path.join(alloc, &.{ compiler_path, "files", comptime "zig" ++ builtin.target.exeFileExt() }));
     try argv.appendSlice(args);
 
-    // TODO: use "execve" if on linux
+    // TODO: consider using "execve" on linux, except when compiling zls
     var proc = std.process.Child.init(argv.items, alloc);
+    proc.cwd = override_cwd;
     const ret_val = try proc.spawnAndWait();
     switch (ret_val) {
         .Exited => |code| return code,
         else => |result| {
             std.log.err("compiler exited with {}", .{result});
-            return 0xff;
+            return error.FailedCompile;
         },
     }
 }
@@ -360,25 +361,31 @@ fn setDefaultVersion(alloc: Allocator, config: Config.Resolved, version: *LazyVe
         else => |e| return e,
     };
 
-//     const source_zls = try std.fs.path.join(alloc, &.{
-//         config.install_dir, version_id, "zls" ++ builtin.target.exeFileExt()
-//     });
-//     defer alloc.free(source_zls);
+    const source_zls = try std.fs.path.join(alloc, &.{
+        config.install_dir, version_id, comptime "zls" ++ builtin.target.exeFileExt()
+    });
+    defer alloc.free(source_zls);
 
     std.log.debug("making symlink of {s} in {s}", .{ source_zig, config.zig_symlink });
-//     std.log.debug("making symlink of {s} in {s}", .{ source_zls, config.zls_symlink });
+    std.log.debug("making symlink of {s} in {s}", .{ source_zls, config.zls_symlink });
 
     // TODO: why can't windows use a regular symlink?
     if (builtin.os.tag == .windows) {
         try createExeLink(source_zig, config.zig_symlink);
-//         try createExeLink(source_zls, config.zls_symlink);
+        try createExeLink(source_zls, config.zls_symlink);
     } else {
         std.fs.cwd().deleteFile(config.zig_symlink) catch |e| switch (e) {
             error.FileNotFound => {},
             else => |e1| return e1,
         };
         try std.fs.cwd().symLink(source_zig, config.zig_symlink, .{});
-//         try std.fs.cwd().symLink(source_zls, config.zls_symlink, .{});
+
+
+        std.fs.cwd().deleteFile(config.zls_symlink) catch |e| switch (e) {
+            error.FileNotFound => {},
+            else => |e1| return e1,
+        };
+        try std.fs.cwd().symLink(source_zls, config.zls_symlink, .{});
     }
 }
 
@@ -493,12 +500,12 @@ fn installCompiler(alloc: Allocator, compiler_dir: []const u8, url: []const u8) 
     try std.fs.cwd().rename(installing_dir, compiler_dir);
 }
 
-fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, compiler_dir: []const u8) !void {
-    const bin_path = try std.mem.concat(alloc, u8, &.{ compiler_dir, "zls" });
+fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, compiler_path: []const u8) !void {
+    const bin_path = try std.mem.concat(alloc, u8, &.{ compiler_path, "zls" });
     defer alloc.free(bin_path);
 
     if (std.fs.cwd().access(bin_path, .{})) {
-        std.log.info("zls '{s}' already installed", .{compiler_dir});
+        std.log.info("zls '{s}' already installed", .{compiler_path});
         return;
     } else |e| {
         if (e != error.FileNotFound) {
@@ -527,6 +534,22 @@ fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, 
 
 
     try zls_git.checkErr(git2.git_libgit2_shutdown());
+
+
+    if (0 != try runCompiler(alloc, config, version, zls_repo_path, &.{"build"})) {
+        return error.FailedCompile;
+    }
+
+    var zls_repo = try std.fs.cwd().openDir(zls_repo_path, .{});
+    defer zls_repo.close();
+
+    var bin_dir = try std.fs.cwd().openDir(compiler_path, .{});
+    defer bin_dir.close();
+
+    zls_repo.copyFile("zig-out/bin/zls", bin_dir, "zls", .{}) catch {
+        std.log.err("failed to copy zls to {s}", .{compiler_path});
+        return;
+    };
 }
 
 fn resolveZlsCommit(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, repo_dir: [:0]const u8) !git2.git_oid {
