@@ -337,6 +337,14 @@ fn cleanOutdatedVersions(alloc: Allocator, config: Config.Resolved) !void {
         ) {
             continue;
         }
+
+        const keep_file = try std.fs.path.join(alloc, &.{ entry.name, ".keep" });
+        defer alloc.free(keep_file);
+
+        if (install_dir.access(keep_file, .{})) {
+            continue;
+        } else |_| {}
+
         std.log.info("deleting '{s}{c}{s}'", .{ config.install_dir, std.fs.path.sep, entry.name });
         try install_dir.deleteTree(entry.name);
     }
