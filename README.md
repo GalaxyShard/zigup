@@ -18,15 +18,17 @@ zig build -Doptimize=ReleaseSafe
 
 # Usage
 
+`<version>` may be any version number, `stable`, `master`, `<version>-mach`, `mach-latest`, `latest-installed`, or `stable-installed`
+
 ```sh
-# fetch a compiler and set it as the default
+# fetch a compiler + zls version and set it as the default
 zigup <version>
 zigup 0.13.0
 zigup 0.4.0-mach
 zigup master
 zigup mach-latest
 
-# fetch a compiler only (do not set it as default)
+# fetch a compiler + zls version (does not set it as default)
 zigup fetch <version>
 zigup fetch master
 
@@ -35,6 +37,8 @@ zigup default
 
 # set the default compiler
 zigup default <version>
+zigup default latest-installed
+zigup default stable-installed
 
 # list the installed compiler versions
 zigup list

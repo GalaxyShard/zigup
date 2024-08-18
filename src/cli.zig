@@ -65,9 +65,9 @@ fn print_help() !void {
         \\Usage:
         \\
         \\  zigup <VERSION>               Download this version of zig/zls and set it as default
-        \\                                May be set to any version number, stable, master, <VERSION>-mach, mach-latest, or latest-installed
+        \\                                May be set to any version number, stable, master, <VERSION>-mach, mach-latest, latest-installed, or stable-installed
         \\
-        \\  zigup fetch <VERSION>         Download <VERSION> compiler
+        \\  zigup fetch <VERSION>         Download this compiler and attempt to compile Zls
         \\  zigup default [VERSION]       Get or set the default compiler/zls (makes a symlink)
         \\  zigup list                    List installed versions
         \\  zigup run <VERSION> ARGS...   Run the given version of the compiler with the given ARGS...
@@ -81,8 +81,8 @@ fn print_help() !void {
         \\  zigup set-zig-symlink <FILE_PATH>   Set the default symlink path (see --zig-symlink)
         \\  zigup set-zls-symlink <FILE_PATH>   Set the default symlink path (see --zls-symlink)
         \\
-        \\  zigup fetch-index             Download and print the index.json
-        \\  zigup fetch-mach-index        Download and print the index.json
+        \\  zigup fetch-index             Download and print Zig's index.json
+        \\  zigup fetch-mach-index        Download and print Mach's index.json
         \\
         \\Options:
         \\  --install-dir <DIR>           Install zig compilers in <DIR>
