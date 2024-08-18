@@ -692,17 +692,21 @@ fn resolveZlsCommit(alloc: Allocator, config: Config.Resolved, version: *LazyVer
     }
 
 
-    // TODO: instead of defaulting to origin/master,
-    // potentially find the closest commit to the compiler date
-    std.log.info("using zls origin/master", .{});
-    if (zls_git.findReference(alloc, repo_dir, "origin/master")) |oid| {
-        const str = git2.git_oid_tostr_s(&oid);
+    if (version.release == .master) {
+        const use_master = zls_git.promptBool("Use the latest master release of Zls? (Y/n): ", true);
+        if (use_master) {
+            std.log.info("using zls origin/master", .{});
+            if (zls_git.findReference(alloc, repo_dir, "origin/master")) |oid| {
+                const str = git2.git_oid_tostr_s(&oid);
 
-        std.log.info("master commit found: {s}", .{std.mem.span(str)});
-        return oid;
-    } else |_| {
-        std.log.info("origin/master reference not found", .{});
+                std.log.info("master commit found: {s}", .{std.mem.span(str)});
+                return oid;
+            } else |_| {
+                std.log.info("origin/master reference not found", .{});
+            }
+        }
     }
+    // TODO: suggest using the nearest commit after the compiler release date
     var zls_version = std.ArrayList(u8).init(alloc);
     while (true) {
         zls_version.clearRetainingCapacity();
@@ -721,6 +725,9 @@ fn resolveZlsCommit(alloc: Allocator, config: Config.Resolved, version: *LazyVer
 
         if (std.mem.eql(u8, zls_version.items, "master")) {
             if (zls_git.findReference(alloc, repo_dir, "origin/master")) |oid| {
+                const str = git2.git_oid_tostr_s(&oid);
+
+                std.log.info("master commit found: {s}", .{std.mem.span(str)});
                 return oid;
             } else |_| {
                 std.log.err("origin/master not found", .{});
