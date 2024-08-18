@@ -32,7 +32,7 @@ fn getDefaultInstallDir(alloc: Allocator) ![]u8 {
 }
 
 pub fn main() !void {
-    // TODO: what is this?
+    // TODO: see if this can be removed (related: https://github.com/ziglang/zig/issues/8943)
     if (builtin.os.tag == .windows) {
         _ = try std.os.windows.WSAStartup(2, 2);
     }
@@ -48,8 +48,12 @@ pub fn main() !void {
     const resolved_install_dir = parsed_cli.config.install_dir orelse try getDefaultInstallDir(alloc);
     const resolved_config: Config.Resolved = .{
         .install_dir = resolved_install_dir,
-        .zig_symlink = parsed_cli.config.zig_symlink orelse try std.fs.path.join(alloc, &.{ resolved_install_dir, "zig" }),
-        .zls_symlink = parsed_cli.config.zls_symlink orelse try std.fs.path.join(alloc, &.{ resolved_install_dir, "zls" }),
+
+        .zig_symlink = parsed_cli.config.zig_symlink
+            orelse try std.fs.path.join(alloc, &.{ resolved_install_dir, comptime "zig" ++ builtin.target.exeFileExt() }),
+
+        .zls_symlink = parsed_cli.config.zls_symlink
+            orelse try std.fs.path.join(alloc, &.{ resolved_install_dir, comptime "zls" ++ builtin.target.exeFileExt() }),
     };
     defer resolved_config.deinit(alloc);
     parsed_cli.config = .{}; // don't deinit twice
@@ -170,17 +174,32 @@ pub fn runCompiler(alloc: Allocator, config: Config.Resolved, version: *LazyVers
 
 const SetDefault = enum { set_default, leave_default };
 
-
+fn handleIdErrorAndExit(version: *const LazyVersion, e: LazyVersion.ResolveError) noreturn {
+    switch (e) {
+        error.InvalidVersion => {
+            std.log.err("Invalid version {s}", .{version.raw});
+        },
+        error.NoInstalledVersions => {
+            std.log.err("No installed versions", .{});
+        },
+        else => {
+            std.log.err("Unable to resolve version id: {s}", .{@errorName(e)});
+        },
+    }
+    std.process.exit(1);
+}
 fn fetchVersion(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, set_default: SetDefault) !void {
     // TODO: detect interuptions
-    const version_id = try version.resolveId(config);
+    const version_id = version.resolveId(config) catch |e| handleIdErrorAndExit(version, e);
     const url = try version.resolveUrl(config);
 
     const compiler_dir = try std.fs.path.join(alloc, &[_][]const u8{ config.install_dir, version_id });
     defer alloc.free(compiler_dir);
     try installCompiler(alloc, compiler_dir, url);
 
-    try installZls(alloc, config, version, compiler_dir);
+    installZls(alloc, config, version, compiler_dir) catch |e| {
+        std.log.err("Failed to install Zls: {s}", .{@errorName(e)});
+    };
 
     if (set_default == .set_default) {
         try setDefaultVersion(alloc, config, version);
@@ -253,7 +272,7 @@ fn listVersions(alloc: Allocator, config: Config.Resolved) !void {
 }
 
 fn keepVersion(config: Config.Resolved, version: *LazyVersion) !void {
-    const version_id = try version.resolveId(config);
+    const version_id = version.resolveId(config) catch |e| handleIdErrorAndExit(version, e);
     var install_dir = try std.fs.cwd().openDir(config.install_dir, .{ .iterate = true });
     defer install_dir.close();
 
@@ -275,7 +294,7 @@ fn keepVersion(config: Config.Resolved, version: *LazyVersion) !void {
 }
 fn cleanVersion(config: Config.Resolved, version: *LazyVersion) !void {
     // TODO: if deleting symlinked, make sure to clean up the symlink
-    const version_id = try version.resolveId(config);
+    const version_id = version.resolveId(config) catch |e| handleIdErrorAndExit(version, e);
 
     var install_dir = std.fs.cwd().openDir(config.install_dir, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return,
@@ -369,6 +388,7 @@ fn getDefaultVersion(alloc: Allocator, config: Config.Resolved) !?[]u8 {
 fn printDefaultVersion(alloc: Allocator, config: Config.Resolved) !void {
     const default_compiler_opt = try getDefaultVersion(alloc, config);
     defer if (default_compiler_opt) |default_compiler| alloc.free(default_compiler);
+
     const stdout = std.io.getStdOut().writer();
     if (default_compiler_opt) |default_compiler| {
         try stdout.print("{s}\n", .{default_compiler});
@@ -401,23 +421,31 @@ fn setDefaultVersion(alloc: Allocator, config: Config.Resolved, version: *LazyVe
     std.log.debug("making symlink of {s} in {s}", .{ source_zig, config.zig_symlink });
     std.log.debug("making symlink of {s} in {s}", .{ source_zls, config.zls_symlink });
 
-    // TODO: why can't windows use a regular symlink?
+    // TODO: why not use a regular symlink on windows?
     if (builtin.os.tag == .windows) {
-        try createExeLink(source_zig, config.zig_symlink);
-        try createExeLink(source_zls, config.zls_symlink);
+        createExeLink(source_zig, config.zig_symlink) catch {
+            std.log.err("Unable to symlink {s} to {s}", .{source_zig, config.zig_symlink});
+        };
+        createExeLink(source_zls, config.zls_symlink) catch {
+            std.log.err("Unable to symlink {s} to {s}", .{source_zls, config.zls_symlink});
+        };
     } else {
         std.fs.cwd().deleteFile(config.zig_symlink) catch |e| switch (e) {
             error.FileNotFound => {},
             else => |e1| return e1,
         };
-        try std.fs.cwd().symLink(source_zig, config.zig_symlink, .{});
+        std.fs.cwd().symLink(source_zig, config.zig_symlink, .{}) catch {
+            std.log.err("Unable to symlink {s} to {s}", .{source_zig, config.zig_symlink});
+        };
 
 
         std.fs.cwd().deleteFile(config.zls_symlink) catch |e| switch (e) {
             error.FileNotFound => {},
             else => |e1| return e1,
         };
-        try std.fs.cwd().symLink(source_zls, config.zls_symlink, .{});
+        std.fs.cwd().symLink(source_zls, config.zls_symlink, .{}) catch {
+            std.log.err("Unable to symlink {s} to {s}", .{source_zls, config.zls_symlink});
+        };
     }
 }
 
@@ -442,7 +470,7 @@ fn createExeLink(link_target: []const u8, path_link: []const u8) !void {
                 "unable to create the exe link, the path '{s}' is a directory",
                 .{ path_link},
             );
-            std.process.exit(1);
+            return error.OverwritesDirectory;
         },
         else => |e| return e,
     };
@@ -468,59 +496,57 @@ fn installCompiler(alloc: Allocator, compiler_dir: []const u8, url: []const u8) 
     try std.fs.cwd().makePath(installing_dir);
 
     const archive_basename = std.fs.path.basename(url);
+
+    const archive = try std.fs.path.join(alloc, &.{ installing_dir, archive_basename });
+    defer alloc.free(archive);
+    std.log.info("downloading '{s}' to '{s}'", .{ url, archive });
+
+    {
+        const file = try std.fs.cwd().createFile(archive, .{});
+        const possible_error = download.download(alloc, url, file.writer());
+        // NOTE: close the file before handling errors
+        //       as it will delete the parent directory of this file
+        file.close();
+
+        possible_error catch |e| {
+            std.log.err("download '{s}' failed: {s}", .{ url, @errorName(e) });
+            // clean up failed install
+            try std.fs.cwd().deleteTree(installing_dir);
+            std.process.exit(1);
+        };
+    }
+
     var archive_root_dir: []const u8 = undefined;
 
-    // download and extract archive
-    {
-        const archive = try std.fs.path.join(alloc, &.{ installing_dir, archive_basename });
-        defer alloc.free(archive);
-        std.log.info("downloading '{s}' to '{s}'", .{ url, archive });
+    if (std.mem.endsWith(u8, archive_basename, ".tar.xz")) {
+        std.log.info("extracting {s} into {s}", .{ archive, installing_dir });
+        archive_root_dir = archive_basename[0 .. archive_basename.len - ".tar.xz".len];
 
-        {
-            const file = try std.fs.cwd().createFile(archive, .{});
-            const possible_error = download.download(alloc, url, file.writer());
-            // NOTE: close the file before handling errors
-            //       as it will delete the parent directory of this file
-            file.close();
+        var file = try std.fs.cwd().openFile(archive, .{});
+        defer file.close();
 
-            possible_error catch |e| {
-                std.log.err("download '{s}' failed: {s}", .{ url, @errorName(e) });
-                // clean up failed install
-                try std.fs.cwd().deleteTree(installing_dir);
-                std.process.exit(1);
-            };
-        }
+        var dir = try std.fs.cwd().openDir(installing_dir, .{});
+        defer dir.close();
 
-        if (std.mem.endsWith(u8, archive_basename, ".tar.xz")) {
-            std.log.info("extracting {s} into {s}", .{ archive, installing_dir });
-            archive_root_dir = archive_basename[0 .. archive_basename.len - ".tar.xz".len];
+        var tar = try std.compress.xz.decompress(alloc, file.reader());
+        try std.tar.pipeToFileSystem(dir, tar.reader(), .{});
 
-            var file = try std.fs.cwd().openFile(archive, .{});
-            defer file.close();
+    } else if (std.mem.endsWith(u8, archive_basename, ".zip")) {
+        std.log.info("extracting {s} into {s}", .{ archive, installing_dir });
+        archive_root_dir = archive_basename[0 .. archive_basename.len - ".zip".len];
 
-            var dir = try std.fs.cwd().openDir(installing_dir, .{});
-            defer dir.close();
+        var file = try std.fs.cwd().openFile(archive, .{});
+        defer file.close();
 
-            var tar = try std.compress.xz.decompress(alloc, file.reader());
-            try std.tar.pipeToFileSystem(dir, tar.reader(), .{});
+        var dir = try std.fs.cwd().openDir(installing_dir, .{});
+        defer dir.close();
 
-        } else if (std.mem.endsWith(u8, archive_basename, ".zip")) {
-            std.log.info("extracting {s} into {s}", .{ archive, installing_dir });
-            archive_root_dir = archive_basename[0 .. archive_basename.len - ".zip".len];
-
-            var file = try std.fs.cwd().openFile(archive, .{});
-            defer file.close();
-
-            var dir = try std.fs.cwd().openDir(installing_dir, .{});
-            defer dir.close();
-
-            try std.zip.extract(dir, file.seekableStream(), .{});
-        } else {
-            std.log.err("unknown archive extension '{s}'", .{archive_basename});
-            return error.UnknownArchiveExtension;
-        }
-        try std.fs.cwd().deleteTree(archive);
+        try std.zip.extract(dir, file.seekableStream(), .{});
+    } else {
+        std.log.err("unknown archive extension '{s}'", .{archive_basename});
+        return error.UnknownArchiveExtension;
     }
+    try std.fs.cwd().deleteFile(archive);
 
     const extracted_dir = try std.fs.path.join(alloc, &.{ installing_dir, archive_root_dir });
     defer alloc.free(extracted_dir);
@@ -533,16 +559,28 @@ fn installCompiler(alloc: Allocator, compiler_dir: []const u8, url: []const u8) 
 }
 
 fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, compiler_path: []const u8) !void {
-    const bin_path = try std.mem.concat(alloc, u8, &.{ compiler_path, "zls" });
+    const bin_path = try std.fs.path.join(alloc, &.{
+        compiler_path, comptime "zls" ++ builtin.target.exeFileExt()
+    });
     defer alloc.free(bin_path);
 
+    const version_id = try version.resolveId(config);
     if (std.fs.cwd().access(bin_path, .{})) {
-        std.log.info("zls '{s}' already installed", .{compiler_path});
-        return;
+        std.log.info("zls '{s}' already installed", .{bin_path});
+
+        const version_num = try std.SemanticVersion.parse(version_id["zig-".len ..]);
+        if (version_num.pre == null) {
+            return;
+        }
+        const try_rebuild = zls_git.promptBool("Attempt to rebuild Zls? (y/N): ", false);
+        if (!try_rebuild) {
+            return;
+        }
     } else |e| {
         if (e != error.FileNotFound) {
             return e;
         }
+        std.log.info("zls '{s}' not installed", .{bin_path});
     }
 
     const zls_repo_path = try std.fs.path.joinZ(alloc, &.{ config.install_dir, "zls-repo" });
@@ -556,19 +594,56 @@ fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, 
 
         const check_updates = zls_git.promptBool("Fetch Zls commits and updates? (Y/n): ", true);
         if (check_updates) {
-            try zls_git.fetchCommits(alloc, zls_repo_path);
+            zls_git.fetchCommits(alloc, zls_repo_path) catch |e| {
+                switch (e) {
+                    error.FailedOpen => {
+                        std.log.err("Failed to open Zls repository. It may need to be deleted ({s})", .{ zls_repo_path });
+                    },
+                    error.MissingRemote => {
+                        std.log.err("Failed to find remote Zls repository. It may need to be deleted ({s})", .{ zls_repo_path });
+                    },
+                    error.FailedFetch => {
+                        std.log.err("Failed to fetch commits. Check your internet or delete the repo to refresh ({s})", .{ zls_repo_path });
+                    },
+                    error.Git2Failed => {
+                        std.log.err("git2 failed", .{});
+                    },
+                }
+                return error.FailedUpdate;
+            };
         }
     } else |_| {
-        try zls_git.cloneRepo(alloc, zls_repo_path);
+        zls_git.cloneRepo(alloc, zls_repo_path) catch {
+            std.log.err("Failed to clone zls to {s}. Check your internet or delete the repo to refresh", .{ zls_repo_path });
+            return error.FailedClone;
+        };
     }
     const oid = try resolveZlsCommit(alloc, config, version, zls_repo_path);
-    try zls_git.checkout(alloc, zls_repo_path, oid);
+    zls_git.checkout(alloc, zls_repo_path, oid) catch |e| {
+        switch (e) {
+            error.FailedOpen => {
+                std.log.err("Failed to open Zls repository. It may need to be deleted ({s})", .{ zls_repo_path });
+            },
+            error.FailedCommitLookup => {
+                const str = git2.git_oid_tostr_s(&oid);
+                std.log.err("Invalid commit {s}", .{ std.mem.span(str) });
+            },
+            error.FailedCheckoutTree, error.FailedDetachHead => {
+                std.log.err("Failed to fetch commits. Check your internet or delete the repo to refresh ({s})", .{ zls_repo_path });
+            },
+            error.Git2Failed => {
+                std.log.err("git2 failed", .{});
+            },
+        }
+        return error.FailedCheckout;
+    };
 
 
     try zls_git.checkErr(git2.git_libgit2_shutdown());
 
     // TODO: make release mode configurable
     if (0 != try runCompiler(alloc, config, version, zls_repo_path, &.{"build", "--release=safe"})) {
+        std.log.err("Failed to compile zls", .{});
         return error.FailedCompile;
     }
 
@@ -578,7 +653,16 @@ fn installZls(alloc: Allocator, config: Config.Resolved, version: *LazyVersion, 
     var bin_dir = try std.fs.cwd().openDir(compiler_path, .{});
     defer bin_dir.close();
 
-    zls_repo.copyFile("zig-out/bin/zls", bin_dir, "zls", .{}) catch {
+    bin_dir.deleteFile(comptime "zls" ++ builtin.target.exeFileExt()) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => return e,
+    };
+    zls_repo.copyFile(
+        comptime "zig-out/bin/zls" ++ builtin.target.exeFileExt(),
+        bin_dir,
+        comptime "zls" ++ builtin.target.exeFileExt(),
+        .{}
+    ) catch {
         std.log.err("failed to copy zls to {s}", .{compiler_path});
         return;
     };
@@ -592,9 +676,11 @@ fn resolveZlsCommit(alloc: Allocator, config: Config.Resolved, version: *LazyVer
     defer alloc.free(c_version_num);
 
     if (zls_git.findReference(alloc, repo_dir, c_version_num)) |oid| {
+        const str = git2.git_oid_tostr_s(&oid);
+        std.log.info("tagged release found: {s}, {s}", .{ version_num, std.mem.span(str) });
         return oid;
     } else |_| {
-        std.log.info("reference not found", .{});
+        std.log.info("tagged release not found", .{});
     }
 
 
@@ -602,6 +688,9 @@ fn resolveZlsCommit(alloc: Allocator, config: Config.Resolved, version: *LazyVer
     // potentially find the closest commit to the compiler date
     std.log.info("using zls origin/master", .{});
     if (zls_git.findReference(alloc, repo_dir, "origin/master")) |oid| {
+        const str = git2.git_oid_tostr_s(&oid);
+
+        std.log.info("master commit found: {s}", .{std.mem.span(str)});
         return oid;
     } else |_| {
         std.log.info("origin/master reference not found", .{});

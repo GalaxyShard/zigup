@@ -58,14 +58,14 @@ pub fn deinit(self: LazyVersion) void {
     if (self.url) |a| self.alloc.free(a);
     if (self.date) |a| self.alloc.free(a);
 }
-const ResolveError = error {
+pub const ResolveError = error {
     NoDate,
     InvalidIndexJson,
     UnsupportedSystem,
     InvalidVersion,
 } || Allocator.Error || version_index.GetIndexError || FindLatestError;
 
-const FindLatestError = error {
+pub const FindLatestError = error {
     FailedInstallSearch,
     NoInstalledVersions,
 } || Allocator.Error;

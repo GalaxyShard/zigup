@@ -117,12 +117,10 @@ pub fn cloneRepo(alloc: Allocator, dir: [:0]const u8) !void {
     std.log.info("cloning zls into {s}", .{ dir });
 
     var clone_opts: git2.git_clone_options = undefined;
-    checkErr(git2.git_clone_options_init(&clone_opts, git2.GIT_CLONE_OPTIONS_VERSION))
-        catch return error.FailedClone;
+    try checkErr(git2.git_clone_options_init(&clone_opts, git2.GIT_CLONE_OPTIONS_VERSION));
 
     var checkout_opts: git2.git_checkout_options = undefined;
-    checkErr(git2.git_checkout_options_init(&checkout_opts, git2.GIT_CHECKOUT_OPTIONS_VERSION))
-        catch return error.FailedClone;
+    try checkErr(git2.git_checkout_options_init(&checkout_opts, git2.GIT_CHECKOUT_OPTIONS_VERSION));
 
     var progress_tracking: ProgressTracking = .{};
 
@@ -161,8 +159,7 @@ pub fn fetchCommits(alloc: Allocator, dir: [:0]const u8) !void {
 
 
     var options: git2.git_fetch_options = undefined;
-    checkErr(git2.git_fetch_options_init(&options, git2.GIT_FETCH_OPTIONS_VERSION))
-        catch return error.FailedFetch;
+    try checkErr(git2.git_fetch_options_init(&options, git2.GIT_FETCH_OPTIONS_VERSION));
 
     options.callbacks.certificate_check = &cert_check;
     checkErr(git2.git_remote_fetch(remote, null, &options, null))
@@ -181,8 +178,7 @@ pub fn checkout(alloc: Allocator, dir: [:0]const u8, oid: git2.git_oid) !void {
 
 
     var checkout_opts: git2.git_checkout_options = undefined;
-    checkErr(git2.git_checkout_options_init(&checkout_opts, git2.GIT_CHECKOUT_OPTIONS_VERSION))
-        catch return error.FailedClone;
+    try checkErr(git2.git_checkout_options_init(&checkout_opts, git2.GIT_CHECKOUT_OPTIONS_VERSION));
 
     var progress_tracking: ProgressTracking = .{};
 
