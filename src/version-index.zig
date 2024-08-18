@@ -8,7 +8,7 @@ const download = @import("download.zig");
 
 const version_index = @This();
 
-pub const MayCache = enum { cache, no_cache };
+pub const MayCache = enum { always_cache, try_cache, never_cache };
 pub const IndexType = enum { zig, mach };
 
 pub const GetIndexError = error {
@@ -47,7 +47,7 @@ pub const Indexes = struct {
         defer cache_dir.close();
 
 
-        if (use_cache == .no_cache) {
+        if (use_cache == .never_cache) {
             return self.fetchAndCache(alloc, cache_dir, index_type);
         }
         if (cache_dir.openFile(cache_file_path, .{})) |cache_file| {
@@ -60,7 +60,7 @@ pub const Indexes = struct {
                 @field(self, field) = json;
                 return &@field(self, field).?;
             } else |e| {
-                std.log.err("failed to read index cache: {}; refreshing", .{e});
+                std.log.err("failed to parse cached index: {}; refreshing", .{e});
                 return self.fetchAndCache(alloc, cache_dir, index_type);
             }
 

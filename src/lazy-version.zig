@@ -29,6 +29,7 @@ const json_platform = host_cpu_arch ++ "-" ++ host_os;
 
 alloc: Allocator,
 raw: []u8,
+release: Release,
 
 index: version_index.Indexes = .{ .mach = null, .zig = null },
 id: ?[]u8 = null,
@@ -37,6 +38,17 @@ date: ?[]u8 = null,
 
 resolve_error: ?ResolveError = null,
 
+pub const Release = enum {
+    stable,
+    master,
+    stable_installed,
+    latest_installed,
+    mach_latest,
+    mach_tagged,
+    tagged,
+    dev,
+};
+
 pub fn init(alloc: Allocator, raw_version: []const u8) !LazyVersion {
     const v = (
         if (std.mem.startsWith(u8, raw_version, "zig-"))
@@ -44,10 +56,28 @@ pub fn init(alloc: Allocator, raw_version: []const u8) !LazyVersion {
         else
             raw_version
     );
+    var release: Release = undefined;
+    if (std.mem.eql(u8, v, "stable")) {
+        release = .stable;
+    } else if (std.mem.eql(u8, v, "master")) {
+        release = .master;
+    } else if (std.mem.eql(u8, v, "latest-installed")) {
+        release = .latest_installed;
+    } else if (std.mem.eql(u8, v, "stable-installed")) {
+        release = .stable_installed;
+    } else if (std.mem.eql(u8, v, "mach-latest")) {
+        release = .mach_latest;
+    } else if (std.mem.endsWith(u8, v, "-mach")) {
+        release = .mach_tagged;
+    } else {
+        const sem = std.SemanticVersion.parse(v) catch return error.InvalidVersion;
+        release = if (sem.pre) |_| .dev else .tagged;
+    }
 
     return .{
         .alloc = alloc,
         .raw = try alloc.dupe(u8, v),
+        .release = release,
     };
 }
 pub fn deinit(self: LazyVersion) void {
@@ -91,42 +121,34 @@ fn urlFromId(alloc: Allocator, id: []const u8) ![]u8 {
     });
 }
 fn resolveAllInner(self: *LazyVersion, config: Config.Resolved) ResolveError!void {
-    if (std.mem.eql(u8, self.raw, "stable")) {
-        try self.findStable();
+    switch (self.release) {
+        .stable => try self.findStable(),
+        .master => try self.findFromIndex("master", .zig, .never_cache),
+        .latest_installed => {
+            const latest_found = try latestInstalledVersion(self.alloc, config.install_dir, .no_filter);
 
-    } else if (std.mem.eql(u8, self.raw, "master")) {
-        try self.findFromIndex(.zig, .no_cache);
-
-    } else if (std.mem.eql(u8, self.raw, "latest-installed")) {
-        const latest_found = try latestInstalledVersion(self.alloc, config.install_dir, .no_filter);
-
-        self.id = latest_found;
-        self.url = try urlFromId(self.alloc, latest_found);
-        // Unless latest-installed is master or a stable/nominated version, it is impossible to find the date/url without saving it during install
-        // This should not be necessary anyways; date is only needed while installing zls
-        return error.NoDate;
-
-    } else if (std.mem.eql(u8, self.raw, "mach-latest")) {
-        try self.findFromIndex(.mach, .no_cache);
-
-    } else if (std.mem.endsWith(u8, self.raw, "-mach")) {
-        try self.findFromIndex(.mach, .cache);
-
-    } else {
-        // validate this is a valid version number
-        _ = std.SemanticVersion.parse(self.raw) catch return error.InvalidVersion;
-        self.id = try std.mem.concat(self.alloc, u8, &.{ "zig-", self.raw });
-        self.url = try urlFromId(self.alloc, self.id.?);
-
-        self.findFromIndex(.zig, .cache) catch |e| switch (e) {
-            error.InvalidVersion => {
-                // No entry in index.json was found, but this is
-                // a valid semantic version and may be a dev release
-                // or the cache hasn't been cleared
-                return error.NoDate;
-            },
-            else => return e,
-        };
+            self.id = latest_found;
+            self.url = try urlFromId(self.alloc, latest_found);
+            // Unless latest-installed is master or a stable/nominated version, it is impossible to find the date without saving it during install
+            return error.NoDate;
+        },
+        .stable_installed => {
+            const latest_found = try latestInstalledVersion(self.alloc, config.install_dir, .stable);
+            try self.findFromIndex(latest_found, .zig, .always_cache);
+        },
+        .mach_latest => try self.findFromIndex("mach-latest", .mach, .never_cache),
+        .mach_tagged => try self.findFromIndex(self.raw, .mach, .try_cache),
+        .tagged => {
+            try self.findFromIndex(self.raw, .zig, .try_cache);
+        },
+        .dev => {
+            self.id = try std.mem.concat(self.alloc, u8, &.{ "zig-", self.raw });
+            self.url = try urlFromId(self.alloc, self.id.?);
+            // Unless this happens to be master or a nominated version,
+            // it is impossible to find the date without an archive of every index
+            // This may not be a valid version as well and there may be no Zig binaries either way
+            return error.NoDate;
+        }
     }
 }
 pub fn resolveId(self: *LazyVersion, config: Config.Resolved) ResolveError![]const u8 {
@@ -169,7 +191,7 @@ fn findStable(self: *LazyVersion) ResolveError!void {
         date.deinit();
     }
 
-    var iter = (try self.index.get(self.alloc, .zig, .no_cache)).value.object.iterator();
+    var iter = (try self.index.get(self.alloc, .zig, .never_cache)).value.object.iterator();
     while (iter.next()) |pair| {
         // note: version is invalidated alongside pair.key_ptr
         if (std.SemanticVersion.parse(pair.key_ptr.*)) |version| {
@@ -211,13 +233,27 @@ fn findStable(self: *LazyVersion) ResolveError!void {
 }
 fn findFromIndex(
     self: *LazyVersion,
+    name: []const u8,
+    comptime index_type: version_index.IndexType,
+    may_cache: version_index.MayCache
+) ResolveError!void {
+    self.findFromIndexHelper(name, index_type, may_cache) catch |e| {
+        if (e == error.InvalidVersion and may_cache == .try_cache) {
+            return self.findFromIndexHelper(name, index_type, .never_cache);
+        }
+        return e;
+    };
+}
+fn findFromIndexHelper(
+    self: *LazyVersion,
+    name: []const u8,
     comptime index_type: version_index.IndexType,
     may_cache: version_index.MayCache
 ) ResolveError!void {
     const index = try self.index.get(self.alloc, index_type, may_cache);
     if (index.value != .object) return error.InvalidIndexJson;
 
-    const version_info = index.value.object.get(self.raw) orelse return error.InvalidVersion;
+    const version_info = index.value.object.get(name) orelse return error.InvalidVersion;
     if (version_info != .object) return error.InvalidIndexJson;
 
     const version_id = version_info.object.get("version");
@@ -236,11 +272,10 @@ fn findFromIndex(
 
         self.id = try std.mem.concat(self.alloc, u8, &.{ "zig-", v.string });
     } else {
-        // "version" is not in the version info if the version is the key (self.raw)
+        // "version" is not in the version info if the version is the key (eg. tagged releases)
         // validate this is a valid version number
-        _ = std.SemanticVersion.parse(self.raw) catch return error.InvalidVersion;
-
-        self.id = try std.mem.concat(self.alloc, u8, &.{ "zig-", self.raw });
+        _ = std.SemanticVersion.parse(name) catch return error.InvalidVersion;
+        self.id = try std.mem.concat(self.alloc, u8, &.{ "zig-", name });
     }
     self.url = try self.alloc.dupe(u8, tarball.string);
     self.date = try self.alloc.dupe(u8, date.string);
