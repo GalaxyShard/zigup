@@ -9,7 +9,7 @@ const Config = @import("config.zig");
 const LazyVersion = @This();
 
 const host_cpu_arch = switch (builtin.cpu.arch) {
-    .x86 => "i386",
+    .x86 => "x86",
     .x86_64 => "x86_64",
     .aarch64 => "aarch64",
     .arm => "armv7a",
