@@ -97,6 +97,15 @@ fn print_help() !void {
         \\  -h, --help                    Display this help text
         \\
     ) catch return error.CannotPrintHelp;
+
+    var self_exe = std.fs.openSelfExe(.{}) catch return;
+    defer self_exe.close();
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.writer().any().writeFile(self_exe) catch return;
+    const hash = hasher.finalResult();
+
+    std.io.getStdOut().writer().print("\nVersion SHA256: {s}\n", .{ std.fmt.fmtSliceHexLower(&hash) }) catch return;
 }
 
 pub fn parseCliArgs(alloc: Allocator, args: []const []const u8) ParseError!ParsedCli {
