@@ -8,9 +8,9 @@
         },
         .git2 = .{
             //.path = "../zig-git2",
-            .url = "git+https://codeberg.org/galaxyshard/zig-git2.git#50ec9eba57d14609272ad198043e8eb6f3c5e10c",
-            .hash = "12208a99ac90e08be4528ce1c9ff66d36947aaff042256a5df14e0f001e16574af02",
-        }
+            .url = "git+https://codeberg.org/galaxyshard/zig-git2.git#9b49ee2aeb930b6168789327787a3ea1b0037018",
+            .hash = "1220c64f456113b29a4a8aaf7a8fc80eaf4c3b7671c073603f074f372166cebc78b0",
+        },
     },
     .paths = .{
         "build.zig",

@@ -56,13 +56,7 @@ fn addZigupExe(
         .target = target,
         .optimize = optimize,
     });
-
-    const header = b.addTranslateC(.{
-        .target = target,
-        .optimize = optimize,
-        .root_source_file = git2.artifact("git2").getEmittedIncludeTree().path(git2.builder, "git2.h"),
-    });
-    const header_module = header.createModule();
+    const header_module = git2.module("git2_header");
 
     const zigup = b.addExecutable(.{
         .name = "zigup",
